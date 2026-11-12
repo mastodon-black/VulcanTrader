@@ -160,6 +160,12 @@ class IStrategy(ABC, HyperStrategyMixin):
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        # `entry_side` (config): "long" / "short" keep one side's entries, "invert" trades every
+        # entry signal the other way (exit signals swap with it). Applied in advise_entry /
+        # advise_exit, so live and every backtest engine see the same signals. Unset = unchanged.
+        if str(config.get("entry_side") or "") in ("short", "invert") \
+                and str(config.get("trading_mode", "")) == "futures":
+            self.can_short = True
         # Dict to determine if analysis is necessary
         self.__last_candle_seen_per_pair: dict[str, datetime] = {}
         super().__init__(config)
@@ -1500,6 +1506,26 @@ class IStrategy(ABC, HyperStrategyMixin):
             current_rate_best = (low if trade.is_short else high) or rate
             current_profit_best = trade.calc_profit_ratio(current_rate_best)
 
+        # Backtest bar (low/high given): custom_exit is asked at the bar's open and exits at that
+        # open, so it must not see this bar's high/low through trade.min_rate/max_rate - that let
+        # AdaptiveMAEMFE's mae_cut leave at the open of every bar that later fell through its
+        # threshold. Ask it first with min/max through the open, then add the bar's range for the
+        # stoploss/ROI checks. Live (no low/high) is unchanged. `backtest_legacy:
+        # {"custom_exit_lookahead": true}` restores the old order.
+        early_custom, asked_early = None, False
+        if (low is not None or high is not None) and self.use_exit_signal \
+                and not (exit_ and not enter) \
+                and not ((self.config or {}).get("backtest_legacy") or {}).get("custom_exit_lookahead"):
+            trade.adjust_min_max_rates(current_rate, current_rate)
+            asked_early = True
+            early_custom = strategy_safe_wrapper(self.custom_exit, default_retval=False)(
+                pair=trade.pair,
+                trade=trade,
+                current_time=current_time,
+                current_rate=current_rate,
+                current_profit=current_profit,
+            )
+
         trade.adjust_min_max_rates(high or current_rate, low or current_rate)
 
         stoplossflag = self.trader_stoploss_reached(
@@ -1525,13 +1551,14 @@ class IStrategy(ABC, HyperStrategyMixin):
             if exit_ and not enter:
                 exit_signal = ExitType.EXIT_SIGNAL
             else:
-                reason_cust = strategy_safe_wrapper(self.custom_exit, default_retval=False)(
-                    pair=trade.pair,
-                    trade=trade,
-                    current_time=current_time,
-                    current_rate=current_rate,
-                    current_profit=current_profit,
-                )
+                reason_cust = early_custom if asked_early else \
+                    strategy_safe_wrapper(self.custom_exit, default_retval=False)(
+                        pair=trade.pair,
+                        trade=trade,
+                        current_time=current_time,
+                        current_rate=current_rate,
+                        current_profit=current_profit,
+                    )
                 if reason_cust:
                     exit_signal = ExitType.CUSTOM_EXIT
                     if isinstance(reason_cust, str):
@@ -1904,7 +1931,7 @@ class IStrategy(ABC, HyperStrategyMixin):
         if "enter_long" not in df.columns:
             df = df.rename({"buy": "enter_long", "buy_tag": "enter_tag"}, axis="columns")
 
-        return df
+        return self._apply_entry_side(df, "enter")
 
     def advise_exit(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
@@ -1921,6 +1948,24 @@ class IStrategy(ABC, HyperStrategyMixin):
         df = self.populate_exit_trend(dataframe, metadata)
         if "exit_long" not in df.columns:
             df = df.rename({"sell": "exit_long"}, axis="columns")
+        return self._apply_entry_side(df, "exit")
+
+    def _apply_entry_side(self, df: DataFrame, kind: str) -> DataFrame:
+        """Config `entry_side`: "long"/"short" drop the other side's entries; "invert" swaps the
+        long and short columns (entries and exits), so each signal trades the opposite way."""
+        side = str((self.config or {}).get("entry_side") or "")
+        if not side:
+            return df
+        lc, sc = f"{kind}_long", f"{kind}_short"
+        for c in (lc, sc):
+            if c not in df.columns:
+                df[c] = 0
+        if side == "invert":
+            df[lc], df[sc] = df[sc].copy(), df[lc].copy()
+        elif kind == "enter" and side == "long":
+            df[sc] = 0
+        elif kind == "enter" and side == "short":
+            df[lc] = 0
         return df
 
     def trader_plot_annotations(self, pair: str, dataframe: DataFrame) -> list[AnnotationType]:

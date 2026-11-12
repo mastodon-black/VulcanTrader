@@ -192,6 +192,8 @@ def _load_cached_data_for_updating(
             end = timerange.stopdt
 
     # Intentionally don't pass timerange in - since we need to load the full dataset.
+    # raise_on_error: an unreadable file would otherwise load as empty, and the
+    # download stored over it would replace its history with just the new candles.
     data = data_handler.ohlcv_load(
         pair,
         timeframe=timeframe,
@@ -200,6 +202,7 @@ def _load_cached_data_for_updating(
         drop_incomplete=True,
         warn_no_data=False,
         candle_type=candle_type,
+        raise_on_error=True,
     )
     if not data.empty:
         if prepend:

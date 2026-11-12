@@ -3,6 +3,7 @@ This module contains the hyperopt optimizer class, which needs to be pickled
 and will be sent to the hyperopt worker processes.
 """
 
+import copy
 import logging
 import sys
 import warnings
@@ -140,6 +141,70 @@ class HyperOptimizer:
         # self.backtesting.exchange = None  # type: ignore
         self.backtesting.pairlists = None  # type: ignore
 
+        self.snapshot_strategy_state()
+
+    def _strategy_shared_objects(self) -> dict[int, Any]:
+        """Framework objects a strategy holds (itself, config, dp, wallets, its parameters):
+        an epoch keeps using these as they are; only the strategy's own state is reset."""
+        s = self.backtesting.strategy
+        shared = [
+            s,
+            self.config,
+            getattr(s, "config", None),
+            getattr(s, "dp", None),
+            getattr(s, "wallets", None),
+            getattr(s, "freqai", None),
+            self.backtesting,
+            getattr(self.backtesting, "exchange", None),
+            getattr(self.backtesting, "dataprovider", None),
+        ]
+        shared += [p for _, p in s.enumerate_parameters()]
+        return {id(o): o for o in shared if o is not None}
+
+    def snapshot_strategy_state(self) -> None:
+        """Keep a copy of the strategy's instance state as it is before the first epoch.
+
+        Every epoch reuses the one strategy object (always with -j 1, where joblib runs epochs
+        in-process). State a strategy keeps in memory - an equity-curve or Kelly sizer, a trade
+        ledger, a cooldown history - would otherwise carry from one epoch into the next, so an
+        epoch's score depended on the epochs before it (2026-11-07: one parameter set scored
+        +$10.5k, +$32.2k and -$7.2k in three epochs of EntelechyEngine's ECSKellyStakeMixin).
+        restore_strategy_state() puts this copy back at the start of each epoch, so an epoch
+        equals a fresh backtest of its parameters."""
+        s = self.backtesting.strategy
+        shared = self._strategy_shared_objects()
+        self._strategy_state: dict[str, Any] = {}
+        self._strategy_state_kept: set[str] = set()
+        uncopyable = []
+        for key, val in vars(s).items():
+            if id(val) in shared or key == "_ft_hyper_params":
+                self._strategy_state_kept.add(key)
+                continue
+            try:
+                self._strategy_state[key] = copy.deepcopy(val, dict(shared))
+            except Exception:  # noqa: BLE001 - locks, open handles, ...
+                self._strategy_state_kept.add(key)
+                uncopyable.append(key)
+        if uncopyable:
+            logger.warning(
+                "Hyperopt: strategy attributes %s cannot be copied and are not reset between "
+                "epochs; state they hold can carry from one epoch into the next.",
+                uncopyable,
+            )
+
+    def restore_strategy_state(self) -> None:
+        """Reset the strategy to its state before the first epoch (see snapshot_strategy_state)."""
+        state = getattr(self, "_strategy_state", None)
+        if state is None:
+            return
+        s = self.backtesting.strategy
+        shared = self._strategy_shared_objects()
+        attrs = vars(s)
+        for key, val in state.items():
+            attrs[key] = copy.deepcopy(val, dict(shared))
+        for key in [k for k in attrs if k not in state and k not in self._strategy_state_kept]:
+            del attrs[key]  # created during an earlier epoch
+
     def get_strategy_name(self) -> str:
         return self.backtesting.strategy.get_strategy_name()
 
@@ -270,6 +335,7 @@ class HyperOptimizer:
         """
         HyperoptStateContainer.set_state(HyperoptState.OPTIMIZE)
         backtest_start_time = datetime.now(UTC)
+        self.restore_strategy_state()
 
         for attr_name, attr in self.backtesting.strategy.enumerate_parameters():
             if attr.in_space and attr.optimize:

@@ -100,6 +100,7 @@ from VulcanTrader.exchange.exchange_utils_timeframe import (
     timeframe_to_seconds,
 )
 from VulcanTrader.exchange.exchange_ws import ExchangeWS
+from VulcanTrader.exchange.shared_rate_limiter import install as install_shared_rate_limiter
 from VulcanTrader.util.misc import (
     chunks,
     deep_merge_dicts,
@@ -125,6 +126,15 @@ T = TypeVar("T")
 # (or trading modes) never block each other.
 _markets_reload_locks: dict[Any, Lock] = {}
 _markets_reload_locks_guard = Lock()
+
+# Funding-rate history + mark candles per pair, shared by every Exchange in the
+# process (see Exchange._shared_funding_inputs). key -> (fetched_at, since_ms,
+# funding_df, mark_df)
+_FUNDING_INPUTS_TTL_S = 600
+_FUNDING_INPUTS_MIN_LOOKBACK = timedelta(days=7)
+_funding_inputs_cache: dict[Any, tuple[float, int, DataFrame, DataFrame]] = {}
+_funding_inputs_locks: dict[Any, Lock] = {}
+_funding_inputs_guard = Lock()
 
 
 class Exchange:
@@ -300,8 +310,13 @@ class Exchange:
         )
         self._api_async = self._init_ccxt(exchange_conf, False, ccxt_async_config)
         _has_watch_ohlcv = self.exchange_has("watchOHLCV") and self.trader_has["ws_enabled"]
+        # data_server is a long-lived live collector in a non-trade runmode; it
+        # opts in so candles stream over websocket instead of REST polling.
         if (
-            self._config["runmode"] in TRADE_MODES
+            (
+                self._config["runmode"] in TRADE_MODES
+                or exchange_conf.get("ws_outside_trade_modes", False)
+            )
             and exchange_conf.get("enable_ws", True)
             and _has_watch_ohlcv
         ):
@@ -483,6 +498,7 @@ class Exchange:
             api.session.mount("https://", adapter)
             api.session.mount("http://", adapter)
 
+        install_shared_rate_limiter(api, sync)
         return api
 
     @property
@@ -925,15 +941,22 @@ class Exchange:
             # except below; get_rate() falls back to its own cached rate),
             # so it isn't worth this same patience.
             retries: int = 6 if force else 1
+            # Scheduled reloads may also reuse the shared cache if a sibling bot
+            # refreshed it within the refresh interval - otherwise every bot in
+            # the fleet re-fetches markets from the network each interval.
+            # Forced non-initial reloads (e.g. after BadSymbol) still go to the
+            # network.
+            use_cache = is_initial or not force
+            cache_max_age_h = 24 if is_initial else self.markets_refresh_interval / 3_600_000
             # Reload async markets, then assign them to sync api
             _t0 = _t.perf_counter()
-            cache_hit = is_initial and self._try_load_markets_from_cache()
+            cache_hit = use_cache and self._try_load_markets_from_cache(cache_max_age_h)
             if not cache_hit:
                 with self._markets_reload_lock():
                     # Re-check: another Exchange instance sharing this cache path
                     # may have won the race and refreshed it while we waited for
                     # the lock - reuse that instead of also hitting the network.
-                    cache_hit = is_initial and self._try_load_markets_from_cache()
+                    cache_hit = use_cache and self._try_load_markets_from_cache(cache_max_age_h)
                     if not cache_hit:
                         # Raises filelock.Timeout (a TimeoutError subclass) after
                         # 120s if every sibling bot is jammed up fetching too -
@@ -945,7 +968,9 @@ class Exchange:
                             # bot launched by the same autostart batch) may have
                             # won the race and written a fresh cache while we
                             # waited on the file lock.
-                            cache_hit = is_initial and self._try_load_markets_from_cache()
+                            cache_hit = use_cache and self._try_load_markets_from_cache(
+                                cache_max_age_h
+                            )
                             if not cache_hit:
                                 retrier(self._load_async_markets, retries=retries)(reload=True)
                                 logger.warning(
@@ -1469,7 +1494,12 @@ class Exchange:
         dry_order: CcxtOrder,
         taker_or_maker: MakerTaker,
     ) -> CcxtOrder:
-        fee = self.get_fee(pair, taker_or_maker=taker_or_maker)
+        # The real fill price, not get_fee()'s price=1 default - CME-style flat
+        # per-contract commissions (Futuressim/Rithmic/Ninjatrader's get_fee()
+        # overrides) convert to a %-of-notional rate that depends on it; a
+        # crypto exchange's %-of-notional rate doesn't care either way.
+        price = dry_order.get("average") or dry_order.get("price") or 1
+        fee = self.get_fee(pair, taker_or_maker=taker_or_maker, price=price)
         dry_order.update(
             {
                 "fee": {
@@ -3078,6 +3108,12 @@ class Exchange:
             if min_ts < self._pairs_last_refresh_time.get((pair, timeframe, candle_type), 0):
                 # Cache can be used - do one-off call.
                 not_all_data = False
+                if not since_ms and self.trader_has.get("ohlcv_incremental_refresh"):
+                    # Only the candles after the last cached one are new; the
+                    # result is merged into the cache by _process_ohlcv_df.
+                    cached = self._klines[(pair, timeframe, candle_type)]
+                    if not cached.empty:
+                        since_ms = int(cached["date"].iloc[-1].timestamp() * 1000)
             else:
                 # Time jump detected, evict cache
                 logger.info(
@@ -4214,18 +4250,7 @@ class Exchange:
         mark_comb: PairWithTimeframe = (pair, timeframe, mark_price_type)
         funding_comb: PairWithTimeframe = (pair, timeframe_ff, CandleType.FUNDING_RATE)
 
-        candle_histories = self.refresh_latest_ohlcv(
-            [mark_comb, funding_comb],
-            since_ms=since_ms,
-            cache=False,
-            drop_incomplete=False,
-        )
-        try:
-            # we can't assume we always get histories - for example during exchange downtimes
-            funding_rates = candle_histories[funding_comb]
-            mark_rates = candle_histories[mark_comb]
-        except KeyError:
-            raise ExchangeError("Could not find funding rates.") from None
+        funding_rates, mark_rates = self._shared_funding_inputs(mark_comb, funding_comb, since_ms)
 
         funding_mark_rates = self.combine_funding_and_mark(funding_rates, mark_rates)
 
@@ -4235,6 +4260,46 @@ class Exchange:
             is_short=is_short,
             open_date=open_date,
             close_date=close_date,
+        )
+
+    def _shared_funding_inputs(
+        self, mark_comb: PairWithTimeframe, funding_comb: PairWithTimeframe, since_ms: int
+    ) -> tuple[DataFrame, DataFrame]:
+        """Funding-rate history and mark candles from `since_ms`, shared across
+        every Exchange instance in this process for a few minutes. Each bot
+        updates funding fees for every open trade at the same scheduled moment,
+        and under single_process_mode many bots hold the same pairs - fetched
+        per trade, that was the same requests repeated once per trade."""
+        import time as _t
+
+        key = (self.id, self.trading_mode, mark_comb, funding_comb)
+        with _funding_inputs_guard:
+            lock = _funding_inputs_locks.setdefault(key, Lock())
+        with lock:
+            hit = _funding_inputs_cache.get(key)
+            if hit is not None and _t.time() - hit[0] < _FUNDING_INPUTS_TTL_S and hit[1] <= since_ms:
+                funding_rates, mark_rates = hit[2], hit[3]
+            else:
+                # Fetch a little further back than this trade needs so sibling
+                # trades opened earlier on the same pair hit the cache too.
+                fetch_since = min(since_ms, dt_ts(dt_now() - _FUNDING_INPUTS_MIN_LOOKBACK))
+                candle_histories = self.refresh_latest_ohlcv(
+                    [mark_comb, funding_comb],
+                    since_ms=fetch_since,
+                    cache=False,
+                    drop_incomplete=False,
+                )
+                try:
+                    # we can't assume we always get histories - for example during exchange downtimes
+                    funding_rates = candle_histories[funding_comb]
+                    mark_rates = candle_histories[mark_comb]
+                except KeyError:
+                    raise ExchangeError("Could not find funding rates.") from None
+                _funding_inputs_cache[key] = (_t.time(), fetch_since, funding_rates, mark_rates)
+        since_ts = Timestamp(since_ms, unit="ms", tz="UTC")
+        return (
+            funding_rates[funding_rates["date"] >= since_ts].reset_index(drop=True),
+            mark_rates[mark_rates["date"] >= since_ts].reset_index(drop=True),
         )
 
     @staticmethod
@@ -4429,9 +4494,16 @@ class Exchange:
 
         market = self.markets[pair]
         # default to some default fee if not available from exchange
-        taker_fee_rate = market["taker"] or self._api.describe().get("fees", {}).get(
-            "trading", {}
-        ).get("taker", 0.001)
+        # (market may omit "taker" entirely - e.g. futuressim's flat-fee
+        # markets - and some minimal ccxt-like adapters don't implement
+        # describe() at all, so both lookups must be done defensively)
+        taker_fee_rate = market.get("taker")
+        if not taker_fee_rate:
+            describe = getattr(self._api, "describe", None)
+            exchange_info = describe() if describe else {}
+            taker_fee_rate = exchange_info.get("fees", {}).get("trading", {}).get(
+                "taker", 0.001
+            )
         mm_ratio, _ = self.get_maintenance_ratio_and_amt(pair, stake_amount)
 
         if self.trading_mode == TradingMode.FUTURES and self.margin_mode == MarginMode.ISOLATED:

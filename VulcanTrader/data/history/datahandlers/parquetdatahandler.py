@@ -31,10 +31,16 @@ class ParquetDataHandler(IDataHandler):
         filename = self._pair_data_filename(self._datadir, pair, timeframe, candle_type)
         self.create_dir_if_needed(filename)
 
-        data.reset_index(drop=True).loc[:, self._columns].to_parquet(filename)
+        frame = data.reset_index(drop=True).loc[:, self._columns]
+        self._write_atomically(filename, frame.to_parquet)
 
     def _ohlcv_load(
-        self, pair: str, timeframe: str, timerange: TimeRange | None, candle_type: CandleType
+        self,
+        pair: str,
+        timeframe: str,
+        timerange: TimeRange | None,
+        candle_type: CandleType,
+        raise_on_error: bool = False,
     ) -> DataFrame:
         """
         Internal method used to load data for one pair from disk.
@@ -71,6 +77,8 @@ class ParquetDataHandler(IDataHandler):
             pairdata["date"] = to_datetime(pairdata["date"], unit="ms", utc=True)
             return pairdata
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.exception(
                 f"Error loading data from {filename}. Exception: {e}. Returning empty dataframe."
             )
@@ -98,7 +106,8 @@ class ParquetDataHandler(IDataHandler):
         """
         filename = self._pair_trades_filename(self._datadir, pair, trading_mode)
         self.create_dir_if_needed(filename)
-        data.reset_index(drop=True).to_parquet(filename)
+        frame = data.reset_index(drop=True)
+        self._write_atomically(filename, frame.to_parquet)
 
     def trades_append(self, pair: str, data: DataFrame):
         """

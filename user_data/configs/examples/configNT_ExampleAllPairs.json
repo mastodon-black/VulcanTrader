@@ -1,0 +1,115 @@
+{
+  "db_url": "json:user_data/accounts/trades-NT_ExampleAllPairs.json",
+  "bot_name": "NT example (all pairs)",
+  "is_bot": false,
+  "dry_run": true,
+  "auto_start": false,
+  "show_terminal": false,
+  "tmux": false,
+  "initial_state": "running",
+  "force_entry_enable": false,
+  "hyperopt_ignore_missing_space": true,
+  "$schema": "https://schema.freqtrade.io/schema.json",
+  "max_open_trades": 3,
+  "stake_currency": "USD",
+  "max_stake_amount": 50000,
+  "stake_amount": 15000,
+  "tradable_balance_ratio": 0.25,
+  "fiat_display_currency": "USD",
+  "dry_run_wallet": 100000,
+  "cancel_open_orders_on_exit": true,
+  "trading_mode": "futures",
+  "leverage": 1,
+  "_comment_fee": "Fallback only. Live/dry-run and --engine rust charge each root's real $/contract fee. This flat rate is used by the plain Python backtest engine; it covers every root except MET (about 0.4%/side).",
+  "fee": 0.00012,
+  "unfilledtimeout": {
+    "entry": 25,
+    "exit": 25,
+    "exit_timeout_count": 0,
+    "unit": "minutes"
+  },
+  "entry_pricing": {
+    "price_side": "other",
+    "use_order_book": false,
+    "order_book_top": 1,
+    "price_last_balance": 0.0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
+  },
+  "exit_pricing": {
+    "price_side": "other",
+    "use_order_book": false,
+    "order_book_top": 1
+  },
+  "exchange": {
+    "name": "ninjatrader",
+    "ninjatrader_account": "Sim101",
+    "key": "",
+    "secret": "",
+    "ccxt_async_config": {},
+    "use_public_trades": false,
+    "pair_whitelist": [
+      "ES-12-26",
+      "NQ-12-26",
+      "RTY-12-26",
+      "YM-12-26",
+      "MES-12-26",
+      "MNQ-12-26",
+      "M2K-12-26",
+      "MYM-12-26",
+
+      "6A-12-26",
+      "6B-12-26",
+      "6C-12-26",
+      "6E-12-26",
+      "6J-12-26",
+      "6M-12-26",
+      "6N-12-26",
+      "6S-12-26",
+      "M6A-12-26",
+      "M6B-12-26",
+      "M6E-12-26",
+      "MICD-12-26",
+
+      "CL-01-27",
+      "MCL-01-27",
+
+      "GC-12-26",
+      "MGC-12-26",
+      "SI-12-26",
+      "SIL-12-26",
+      "HG-12-26",
+      "MHG-12-26",
+      "PL-01-27",
+
+      "ZT-12-26",
+      "ZN-12-26",
+      "ZB-12-26",
+      "UB-12-26",
+
+      "ZC-12-26",
+      "ZS-01-27",
+      "ZL-12-26",
+      "ZW-12-26",
+
+      "MBT-11-26",
+      "ETH-11-26",
+      "MET-11-26"
+    ],
+    "pair_blacklist": [],
+    "ccxt_config": {}
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "internals": {
+    "process_throttle_secs": 5
+  },
+  "data_server": {
+    "enabled": false
+  }
+}

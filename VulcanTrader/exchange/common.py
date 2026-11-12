@@ -76,6 +76,10 @@ MAP_EXCHANGE_CHILDCLASS = {
 NON_CCXT_EXCHANGES = [
     "bitunix",
     "polymarket",
+    "futuressim",
+    "rithmic",
+    "ninjatrader",
+    "metatrader",
 ]
 
 SUPPORTED_EXCHANGES = [
@@ -94,6 +98,9 @@ SUPPORTED_EXCHANGES = [
     "okx",
     "myokx",
     "polymarket",
+    "rithmic",
+    "ninjatrader",
+    "metatrader",
 ]
 
 # either the main, or replacement methods (array) is required

@@ -103,10 +103,16 @@ def heikinashi(bars):
     bars = bars.copy()
     bars["ha_close"] = (bars["open"] + bars["high"] + bars["low"] + bars["close"]) / 4
 
-    # ha open
-    bars.at[0, "ha_open"] = (bars.at[0, "open"] + bars.at[0, "close"]) / 2
-    for i in range(1, len(bars)):
-        bars.at[i, "ha_open"] = (bars.at[i - 1, "ha_open"] + bars.at[i - 1, "ha_close"]) / 2
+    # ha open - each bar depends on the previous one, so loop, but over plain
+    # numpy values: per-cell bars.at[] made this ~90% of an Ichimoku strategy's
+    # whole analysis time. Same float64 arithmetic in the same order.
+    ha_close = bars["ha_close"].to_numpy(dtype=np.float64)
+    ha_open = np.empty(len(bars), dtype=np.float64)
+    if len(bars):
+        ha_open[0] = (bars["open"].iat[0] + bars["close"].iat[0]) / 2
+        for i in range(1, len(bars)):
+            ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2
+    bars["ha_open"] = ha_open
 
     bars["ha_high"] = bars.loc[:, ["high", "ha_open", "ha_close"]].max(axis=1)
     bars["ha_low"] = bars.loc[:, ["low", "ha_open", "ha_close"]].min(axis=1)

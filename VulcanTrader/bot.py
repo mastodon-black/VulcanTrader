@@ -13,7 +13,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -22,11 +24,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 # Windows: both asyncio loop types log spurious connection-error tracebacks on
-# shutdown that aren't real errors. Suppressed in win_asyncio_fix.py (shared
-# with data_server.py; kept top-level so it needs zero third-party deps).
-from VulcanTrader.win_asyncio_fix import apply as _apply_win_asyncio_fix
+# shutdown that aren't real errors. Suppressed in config/asyncio_config.py
+# (shared with data_server.py).
+from VulcanTrader.config.asyncio_config import asyncio_setup
 
-_apply_win_asyncio_fix()
+asyncio_setup()
 
 logger = logging.getLogger("VulcanTrader.bot")
 
@@ -121,7 +123,7 @@ def _build_args_dict(args: argparse.Namespace, configs: list[str]) -> dict[str, 
 #  Logging
 # ---------------------------------------------------------------------------
 
-def _setup_logging(verbosity: int, logfile: str | None) -> None:
+def _setup_logging(verbosity: int, logfile: str | None, name_suffix: str = "") -> None:
     from VulcanTrader.util.logger import setup  # type: ignore
 
     level = logging.WARNING
@@ -133,7 +135,7 @@ def _setup_logging(verbosity: int, logfile: str | None) -> None:
     # Initialise the shared logger — creates the per-run timestamped file under
     # VulcanTrader/logs/ and a stderr handler.  Must happen before any other code
     # so that ALL subsequent log calls reach the file.
-    setup(level=level)
+    setup(level=level, name_suffix=name_suffix)
 
     # Optional EXTRA fixed-path handler, only when the caller explicitly passes
     # --logfile (see main() - no longer defaulted to one shared bot.log for
@@ -389,6 +391,7 @@ def run_bot_lifecycle(
     from VulcanTrader.enums import State  # type: ignore
     from VulcanTrader.util.ctx_thread import start_thread_with_context
     from VulcanTrader.persistence.models import release_writer_lock
+    from VulcanTrader.util.exceptions import ConfigurationError
 
     def _cleanup(bot: Any, portal: Any) -> None:
         """bot.cleanup() + portal.cleanup(), then release the OS writer
@@ -471,6 +474,15 @@ def run_bot_lifecycle(
     while bot is None and not stop_event.is_set():
         try:
             bot = VulcanTraderBot(config)
+        except ConfigurationError:
+            # Retrying can't fix a bad config - it only floods the log every
+            # 30s for the life of the process.
+            logger.exception(
+                "[trade] bot configuration is invalid - not starting this bot. "
+                "Fix the config and start it again from the dashboard/Discord."
+            )
+            release_writer_lock()
+            return
         except Exception:
             logger.exception(
                 "[trade] bot initialisation failed - retrying in %.0fs "
@@ -658,17 +670,28 @@ _IN_PROCESS_BOTS: dict[str, dict[str, Any]] = {}  # account_name -> {"stop_event
 _IN_PROCESS_LOCK = threading.Lock()
 
 
-def _read_single_process_mode(user_data_dir: Path) -> bool:
-    """Cheap raw read of system.json's single_process_mode - not the full
-    Configuration loader, since this may run on every fleet scan."""
+def _read_system_config_raw(user_data_dir: Path) -> dict[str, Any]:
+    """Cheap raw read of system.json - not the full Configuration loader,
+    since this may run on every fleet scan."""
     sys_cfg = user_data_dir / DEFAULT_SYSTEM_CONFIG_SUBDIR / SYSTEM_CONFIG_NAME
     if not sys_cfg.is_file():
-        return False
+        return {}
     try:
         raw = json.loads(sys_cfg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return bool(raw.get("single_process_mode", False)) if isinstance(raw, dict) else False
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _read_single_process_mode(user_data_dir: Path) -> bool:
+    return bool(_read_system_config_raw(user_data_dir).get("single_process_mode", False))
+
+
+def _read_fleet_worker_processes(user_data_dir: Path) -> int:
+    try:
+        return max(1, int(_read_system_config_raw(user_data_dir).get("fleet_worker_processes", 1)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def launch_bot_in_process(
@@ -872,8 +895,18 @@ def cmd_webserver(args: argparse.Namespace) -> int:
     # process is hosting in-process (single_process_mode) - a plain SIGINT
     # only knows to stop the portal's own uvicorn server, it has no idea any
     # bot threads exist otherwise. A no-op registry when single_process_mode
-    # is off (or unused) - see stop_all_in_process_bots.
-    portal = WebPortal(_Stub(config) if config else None, on_shutdown=stop_all_in_process_bots)
+    # is off (or unused) - see stop_all_in_process_bots. Also stops any fleet
+    # worker processes (fleet_worker_processes > 1), which this process then
+    # waits for after portal.start() returns - hence the longer watchdog.
+    user_data_dir = _user_data_dir(args)
+    uses_fleet_workers = (
+        _read_single_process_mode(user_data_dir) and _read_fleet_worker_processes(user_data_dir) > 1
+    )
+    portal = WebPortal(
+        _Stub(config) if config else None,
+        on_shutdown=_shutdown_fleet,
+        shutdown_timeout_s=_FLEET_WORKER_STOP_GRACE_S + 15 if uses_fleet_workers else None,
+    )
 
     # The interactive Discord (!) command client belongs here, not in
     # cmd_trade() - it's a control-plane concern for the one persistent
@@ -902,13 +935,19 @@ def cmd_webserver(args: argparse.Namespace) -> int:
         discord_logger.log_startup("VulcanTrader Bot manager started")
 
     if not getattr(args, "no_autostart", False):
+        # system.json "ninjatrader": {"auto_start": true} - bring NinjaTrader 8
+        # (+ its VulcanTraderBridge AddOn) up before the ninjatrader bots
+        # start. Non-blocking and a no-op if NT8 is already up or another
+        # manager owns it (see util/ninjatrader_launcher.py). Tied to fleet
+        # autostart, so a second `--no-autostart` webserver doesn't do it.
+        _start_ninjatrader_if_configured(user_data_dir)
         # Bring up every auto_start:true config as part of starting the
         # fleet-control process itself - previously this required a separate
         # `bot.py autostart` invocation every time, which meant starting the
         # dashboard/Discord bot alone did NOT actually launch any bot at all,
         # even ones explicitly marked auto_start:true.
         try:
-            _launch_autostart_configs(_user_data_dir(args))
+            _launch_autostart_configs(user_data_dir, args.verbose)
         except Exception:
             logger.exception("autostart scan failed - continuing without it")
 
@@ -917,6 +956,7 @@ def cmd_webserver(args: argparse.Namespace) -> int:
     finally:
         if discord_bot:
             discord_bot.stop()
+        _wait_for_fleet_workers(_FLEET_WORKER_STOP_GRACE_S + 10)
     return 0
 
 
@@ -962,11 +1002,15 @@ def _scan_autostart_configs(user_data_dir: Path) -> list[dict[str, Any]]:
             # bot may want different terminal-visibility behavior.
             "show_terminal": raw.get("show_terminal", True),
             "tmux": bool(raw.get("tmux", False)),
+            # Rough per-bot CPU weight for spreading bots across fleet workers.
+            "pairs": len((raw.get("exchange") or {}).get("pair_whitelist") or []),
+            # Lets _shard_specs keep single-connection exchanges on one worker.
+            "exchange": str((raw.get("exchange") or {}).get("name") or "").lower(),
         })
     return specs
 
 
-def _launch_autostart_configs(user_data_dir: Path) -> int:
+def _launch_autostart_configs(user_data_dir: Path, verbosity: int = 0) -> int:
     """Scan every config for auto_start:true and launch each (as a
     subprocess, or in-process if single_process_mode is on). Returns how
     many were launched. db_url is always derived from the config's own
@@ -992,7 +1036,7 @@ def _launch_autostart_configs(user_data_dir: Path) -> int:
                 return False
 
     used_ports: set[int] = set()
-    launched = 0
+    pending: list[tuple[dict[str, Any], int]] = []
     for spec in specs:
         # Real bind-probe, not just "not picked yet in this batch" - otherwise
         # every config without an explicit port tries to grab 8080, which
@@ -1002,30 +1046,26 @@ def _launch_autostart_configs(user_data_dir: Path) -> int:
             port += 1
         used_ports.add(port)
 
-        mode = "dry_run" if spec["dry_run"] else "live"
-        db_url = f"json:///user_data/accounts/{spec['config_name']}_{mode}.json"
-
         # Skip configs whose bot is already running, or a restart/second
         # autostart spawns a duplicate process fighting over the same
-        # account lock. In-process check first (lock probe isn't reliable
-        # for that case on POSIX - see in_process_bot_running).
-        account_name = f"{spec['config_name']}_{mode}"
-        already_running = bool(in_process_bot_running(account_name))
-        if not already_running:
-            try:
-                from VulcanTrader.persistence.models import _path_from_db_url
-                from VulcanTrader.web_portal import WebPortal
-                already_running = bool(WebPortal._probe_db_lock(_path_from_db_url(db_url)))
-            except Exception:
-                logger.debug("autostart: running-check failed for %s", spec["config_name"], exc_info=True)
-                already_running = False
-        if already_running:
+        # account lock.
+        account_name, db_url = _spec_account(spec)
+        if _account_running(account_name, db_url):
             logger.info(
                 "autostart: %s's bot is already running (db=%s) - skipping",
                 spec["config_name"], db_url,
             )
             continue
+        pending.append((spec, port))
 
+    workers = _read_fleet_worker_processes(user_data_dir) if single_process_mode else 1
+    if workers > 1 and pending:
+        _launch_fleet_workers([spec for spec, _ in pending], user_data_dir, workers, verbosity)
+        logger.info("autostart: launched %d bot(s) across fleet workers.", len(pending))
+        return len(pending)
+
+    for spec, port in pending:
+        db_url = _spec_account(spec)[1]
         if single_process_mode:
             # Fleet bots are controlled entirely through account-file scanning
             # and stop-files (see web_portal.py's _scan_live_bots /
@@ -1053,15 +1093,295 @@ def _launch_autostart_configs(user_data_dir: Path) -> int:
                 spec["config_name"], spec["strategy"], port, db_url,
             )
             launch_detached(cmd, spec)
-        launched += 1
 
-    logger.info("autostart: launched %d bot(s).", launched)
-    return launched
+    logger.info("autostart: launched %d bot(s).", len(pending))
+    return len(pending)
 
 
 def cmd_autostart(args: argparse.Namespace) -> int:
     """CLI entry point for ``bot.py autostart`` - see `_launch_autostart_configs`."""
-    _launch_autostart_configs(_user_data_dir(args))
+    _start_ninjatrader_if_configured(_user_data_dir(args))
+    _launch_autostart_configs(_user_data_dir(args), args.verbose)
+    return 0
+
+
+def _start_ninjatrader_if_configured(user_data_dir: Path) -> None:
+    """Fleet-start hook for system.json's ``ninjatrader.auto_start`` - see
+    util/ninjatrader_launcher.py. Never lets a NinjaTrader problem stop the
+    fleet from starting."""
+    try:
+        from VulcanTrader.util import ninjatrader_launcher
+        ninjatrader_launcher.start_for_fleet(_read_system_config_raw(user_data_dir))
+    except Exception:
+        logger.exception("ninjatrader: auto_start failed - continuing without it")
+
+
+def cmd_ninjatrader(args: argparse.Namespace) -> int:
+    """``bot.py ninjatrader [status|start|stop|auto-start [on|off]]`` -
+    NinjaTrader 8 for the ninjatrader exchange, using system.json's
+    ``ninjatrader`` block (bridge host/port, memory caps). ``start`` works
+    whether or not auto_start is on; ``auto-start on|off`` flips the setting."""
+    from VulcanTrader.util import ninjatrader_launcher
+
+    user_data_dir = _user_data_dir(args)
+    system_cfg = _read_system_config_raw(user_data_dir)
+    if args.action == "auto-start":
+        if args.value is None:
+            print(f"ninjatrader.auto_start = {str(ninjatrader_launcher.auto_start_enabled(system_cfg)).lower()}")
+        else:
+            print(ninjatrader_launcher.set_auto_start(
+                args.value == "on", user_data_dir / DEFAULT_SYSTEM_CONFIG_SUBDIR / SYSTEM_CONFIG_NAME))
+        return 0
+    if args.action == "status":
+        for key, value in ninjatrader_launcher.status(system_cfg).items():
+            print(f"{key:22} {value}")
+        return 0
+    if args.action == "start":
+        print(ninjatrader_launcher.start(system_cfg, watch=False))
+        return 0
+    print(ninjatrader_launcher.stop(system_cfg))
+    return 0
+
+
+def _spec_account(spec: dict[str, Any]) -> tuple[str, str]:
+    """(account name, db_url) for an autostart spec - keyed by config filename."""
+    mode = "dry_run" if spec["dry_run"] else "live"
+    account_name = f"{spec['config_name']}_{mode}"
+    return account_name, f"json:///user_data/accounts/{account_name}.json"
+
+
+def _account_running(account_name: str, db_url: str) -> bool:
+    """In-process check first (a lock probe isn't reliable for that case on
+    POSIX - see in_process_bot_running), then the account's writer lock,
+    which covers bots hosted by any other process."""
+    if in_process_bot_running(account_name):
+        return True
+    try:
+        from VulcanTrader.persistence.models import _path_from_db_url
+        from VulcanTrader.web_portal import WebPortal
+        return bool(WebPortal._probe_db_lock(_path_from_db_url(db_url)))
+    except Exception:
+        logger.debug("running-check failed for %s", account_name, exc_info=True)
+        return False
+
+
+# ---------------------------------------------------------------------------
+#  Fleet workers: single_process_mode split across several processes. One
+#  process means one GIL, so a large fleet saturates a single core while the
+#  rest sit idle. Each worker hosts its share of bots in-process exactly as
+#  the webserver does with one process; the webserver stays the control plane
+#  (dashboard/Discord), which already reaches bots in other processes through
+#  account-lock probes and stop files.
+# ---------------------------------------------------------------------------
+
+_FLEET_WORKERS: list[dict[str, Any]] = []
+_FLEET_WORKERS_LOCK = threading.Lock()
+_FLEET_SHUTTING_DOWN = threading.Event()
+_FLEET_RESTART_DELAY_S = 30.0
+# How long a stopping worker lets its bots finish their current cycle. The
+# webserver waits for its workers (see cmd_webserver), so this bounds Ctrl+C.
+_FLEET_WORKER_STOP_GRACE_S = 20.0
+
+
+# Exchanges whose bots must all run in ONE worker process. NinjaTrader: every
+# process opens its own connection to the NT8 AddOn, and NT8 history requests
+# for the same instrument collide across independent connections - they come
+# back empty or never come back (see the exchange/ninjatrader.py docstring).
+# With the bots spread over all 4 workers (2026-11-11) HG/NQ/SIL backfills hung
+# outright and the rest failed ~200k times in 15 h.
+_SINGLE_PROCESS_EXCHANGES = frozenset({"ninjatrader"})
+
+
+def _shard_specs(specs: list[dict[str, Any]], n: int) -> list[list[dict[str, Any]]]:
+    """Greedy balance by pair count: heaviest bot first, onto the lightest worker.
+    Bots on a _SINGLE_PROCESS_EXCHANGES exchange are all placed on the first
+    worker before anything else is balanced around them."""
+    shards: list[list[dict[str, Any]]] = [[] for _ in range(n)]
+    loads = [0] * n
+    rest = []
+    for spec in specs:
+        if spec.get("exchange") in _SINGLE_PROCESS_EXCHANGES:
+            shards[0].append(spec)
+            loads[0] += max(1, spec.get("pairs", 0))
+        else:
+            rest.append(spec)
+    for spec in sorted(rest, key=lambda s: s.get("pairs", 0), reverse=True):
+        i = loads.index(min(loads))
+        shards[i].append(spec)
+        loads[i] += max(1, spec.get("pairs", 0))
+    return [shard for shard in shards if shard]
+
+
+def _spawn_fleet_worker(worker: dict[str, Any]) -> None:
+    cmd = [
+        sys.executable, "-m", "VulcanTrader.bot", "fleet-worker",
+        "--worker-id", str(worker["worker_id"]),
+        "--user-data-dir", str(worker["user_data_dir"]),
+        *(["-" + "v" * worker["verbosity"]] if worker["verbosity"] else []),
+        "--bots", *worker["configs"],
+    ]
+    # Own process group / session: a terminal Ctrl+C then reaches only the
+    # webserver, which stops the workers itself (see stop_fleet_workers) -
+    # otherwise each worker got SIGINT from the terminal AND SIGTERM from the
+    # webserver, and treated the second as "force exit".
+    if os.name == "posix":
+        worker["proc"] = subprocess.Popen(cmd, start_new_session=True)
+    else:
+        worker["proc"] = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    logger.warning(
+        "[fleet] worker %d started (pid %d) hosting %d bot(s)",
+        worker["worker_id"], worker["proc"].pid, len(worker["configs"]),
+    )
+
+
+def _launch_fleet_workers(
+    specs: list[dict[str, Any]], user_data_dir: Path, n: int, verbosity: int
+) -> None:
+    shards = _shard_specs(specs, n)
+    with _FLEET_WORKERS_LOCK:
+        first_id = len(_FLEET_WORKERS) + 1
+        for offset, shard in enumerate(shards):
+            worker = {
+                "worker_id": first_id + offset,
+                "configs": [spec["config_name"] for spec in shard],
+                "db_urls": [_spec_account(spec)[1] for spec in shard],
+                "user_data_dir": user_data_dir,
+                "verbosity": verbosity,
+            }
+            _spawn_fleet_worker(worker)
+            _FLEET_WORKERS.append(worker)
+    threading.Thread(
+        target=_supervise_fleet_workers, name="FleetWorkerSupervisor", daemon=True
+    ).start()
+
+
+def _supervise_fleet_workers() -> None:
+    """Restart a worker that died abnormally. A worker exits 0 on its own once
+    every bot it hosted has been stopped (e.g. from the dashboard) - that is
+    deliberate and must not bring those bots back."""
+    while not _FLEET_SHUTTING_DOWN.wait(10.0):
+        with _FLEET_WORKERS_LOCK:
+            workers = list(_FLEET_WORKERS)
+        for worker in workers:
+            code = worker["proc"].poll()
+            if code is None or code == 0:
+                continue
+            now = time.time()
+            if "restart_at" not in worker:
+                worker["restart_at"] = now + _FLEET_RESTART_DELAY_S
+                logger.error(
+                    "[fleet] worker %d (pid %d) exited with code %s - restarting it in %.0fs",
+                    worker["worker_id"], worker["proc"].pid, code, _FLEET_RESTART_DELAY_S,
+                )
+            elif now >= worker["restart_at"] and not _FLEET_SHUTTING_DOWN.is_set():
+                del worker["restart_at"]
+                _spawn_fleet_worker(worker)
+
+
+def stop_fleet_workers() -> None:
+    """Tell every fleet worker to stop its bots and exit. Non-blocking - runs
+    from WebPortal's signal handler; each worker shuts down on its own."""
+    _FLEET_SHUTTING_DOWN.set()
+    with _FLEET_WORKERS_LOCK:
+        workers = list(_FLEET_WORKERS)
+    for worker in workers:
+        proc = worker["proc"]
+        if proc.poll() is not None:
+            continue
+        try:
+            if os.name == "posix":
+                proc.send_signal(signal.SIGTERM)
+            else:
+                # SIGTERM is a hard kill on Windows - use each bot's own
+                # cross-process stop file instead (see run_bot_lifecycle).
+                from VulcanTrader.persistence.models import _path_from_db_url
+                for db_url in worker["db_urls"]:
+                    db_path = _path_from_db_url(db_url)
+                    db_path.with_name(db_path.name + ".stop").touch()
+        except OSError:
+            logger.warning("[fleet] could not signal worker %d", worker["worker_id"], exc_info=True)
+
+
+def _shutdown_fleet() -> None:
+    stop_all_in_process_bots()
+    stop_fleet_workers()
+
+
+def _wait_for_fleet_workers(timeout_s: float) -> None:
+    """Block until every fleet worker has exited (or timeout). Exiting the
+    webserver first let an immediate restart see the old workers' bots still
+    holding their locks, skip them as "already running", and leave them down."""
+    with _FLEET_WORKERS_LOCK:
+        procs = [worker["proc"] for worker in _FLEET_WORKERS]
+    deadline = time.time() + timeout_s
+    for proc in procs:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            logger.warning("[fleet] worker pid %d still running at shutdown - leaving it", proc.pid)
+
+
+def cmd_fleet_worker(args: argparse.Namespace) -> int:
+    """Host the given autostart configs in-process (spawned by the webserver
+    when fleet_worker_processes > 1). Exits once all its bots have stopped."""
+    user_data_dir = _user_data_dir(args)
+    worker_id = args.worker_id
+    specs = {spec["config_name"]: spec for spec in _scan_autostart_configs(user_data_dir)}
+    stop = threading.Event()
+
+    def _on_signal(signum, _frame) -> None:  # noqa: ARG001
+        if stop.is_set():
+            logger.warning("[fleet-worker %d] second signal - forcing exit", worker_id)
+            os._exit(130)
+        logger.warning("[fleet-worker %d] signal %s - stopping bots", worker_id, signum)
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _on_signal)
+        except (ValueError, OSError):
+            pass
+
+    launched = 0
+    for name in args.bots:
+        spec = specs.get(name)
+        if spec is None:
+            logger.warning("[fleet-worker %d] %s is no longer an autostart bot - skipping", worker_id, name)
+            continue
+        account_name, db_url = _spec_account(spec)
+        if _account_running(account_name, db_url):
+            logger.warning("[fleet-worker %d] %s is already running - skipping", worker_id, name)
+            continue
+        launch_bot_in_process(spec, user_data_dir, None, no_web=True)
+        launched += 1
+    logger.warning("[fleet-worker %d] hosting %d bot(s)", worker_id, launched)
+
+    from VulcanTrader.util.thread_dump import dump_if_requested
+
+    # Touch this file to get every thread's stack (bot threads are named
+    # "Bot-<account>") - see util/thread_dump.py for why not py-spy/faulthandler.
+    stacks_trigger = user_data_dir / "logs" / f"fleet-worker-{worker_id}.dumpstacks"
+    while not stop.wait(5.0):
+        dumped = dump_if_requested(stacks_trigger, f"fleet-worker-{worker_id}")
+        if dumped:
+            logger.warning("[fleet-worker %d] thread stacks written to %s", worker_id, dumped)
+        with _IN_PROCESS_LOCK:
+            if not _IN_PROCESS_BOTS:
+                logger.warning("[fleet-worker %d] no bots left - exiting", worker_id)
+                return 0
+
+    stop_all_in_process_bots()
+    with _IN_PROCESS_LOCK:
+        threads = [handle["thread"] for handle in _IN_PROCESS_BOTS.values()]
+    deadline = time.time() + _FLEET_WORKER_STOP_GRACE_S
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.time()))
+    still_running = sum(thread.is_alive() for thread in threads)
+    if still_running:
+        logger.warning(
+            "[fleet-worker %d] %d bot(s) still mid-cycle after %.0fs - exiting anyway",
+            worker_id, still_running, _FLEET_WORKER_STOP_GRACE_S,
+        )
     return 0
 
 
@@ -1172,6 +1492,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ws.set_defaults(func=cmd_webserver)
 
+    # fleet-worker ------------------------------------------------------------
+    p_fw = sub.add_parser(
+        "fleet-worker",
+        help="Internal: host a share of the autostart fleet in-process. Spawned by "
+             "'webserver' when system.json sets fleet_worker_processes > 1.",
+    )
+    _common_args(p_fw)
+    p_fw.add_argument("--worker-id", dest="worker_id", type=int, required=True)
+    p_fw.add_argument("--bots", nargs="+", required=True, metavar="CONFIG",
+                      help="Autostart config names (without .json) to host.")
+    p_fw.set_defaults(func=cmd_fleet_worker)
+
     # autostart --------------------------------------------------------------
     p_auto = sub.add_parser(
         "autostart",
@@ -1179,6 +1511,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _common_args(p_auto)
     p_auto.set_defaults(func=cmd_autostart)
+
+    # ninjatrader ------------------------------------------------------------
+    p_nt = sub.add_parser(
+        "ninjatrader",
+        help="Status / start / stop NinjaTrader 8 for the ninjatrader exchange "
+             "(system.json ninjatrader.auto_start starts it with the fleet).",
+    )
+    p_nt.add_argument("action", nargs="?", default="status", choices=["status", "start", "stop", "auto-start"])
+    p_nt.add_argument("value", nargs="?", choices=["on", "off"],
+                      help="With auto-start: turn system.json ninjatrader.auto_start on/off (omit to show it).")
+    _common_args(p_nt)
+    p_nt.set_defaults(func=cmd_ninjatrader)
 
     # lookahead-analysis ---------------------------------------------------
     p_la = sub.add_parser(
@@ -1319,7 +1663,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # No default --logfile: every process already gets its own timestamped,
     # rotating log file under user_data/logs/ (see _setup_logging). --logfile
     # is opt-in only, for a caller that wants one extra fixed path.
-    _setup_logging(args.verbose, getattr(args, "logfile", None))
+    name_suffix = f"_worker{args.worker_id}" if args.command == "fleet-worker" else ""
+    _setup_logging(args.verbose, getattr(args, "logfile", None), name_suffix)
 
     try:
         return int(args.func(args) or 0)

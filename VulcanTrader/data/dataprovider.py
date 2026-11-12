@@ -6,6 +6,7 @@ Common Interface for bot and strategy to access data.
 """
 
 import logging
+import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -59,6 +60,12 @@ class DataProvider:
         # actually has the data; None (the default) means "not in use" and every
         # call behaves exactly as it did before this feature existed.
         self._data_server_client = None
+        # (pair, timeframe, candle_type) -> monotonic time of the last
+        # "No data found" warning - see get_pair_dataframe.
+        self._no_data_warned: dict[tuple[str, str | None, str], float] = {}
+        # pair_key -> monotonic time before which a data_server pull is skipped
+        # - see _refresh_ohlcv_from_data_server.
+        self._pull_retry_at: dict[tuple, float] = {}
         # Filled by the data_server client's "webhook" push callbacks (see
         # set_data_server_client below) the moment the master forwards a fresh
         # funding-rate/trades tick for a pair we're watching - checked first by
@@ -412,8 +419,19 @@ class DataProvider:
                 cutoff_date = timeframe_to_prev_date(timeframe, self.__slice_date)
                 data = data.loc[data["date"] < cutoff_date]
         if len(data) == 0:
-            logger.warning(f"No data found for ({pair}, {timeframe}, {candle_type}).")
+            # Throttled per combination: strategies sometimes call this once
+            # per dataframe ROW, and an unthrottled warning then flooded the
+            # log (~84k lines per cycle for one bot) - in a shared fleet
+            # process every other bot that logs then waited on that flood.
+            key = (pair, timeframe, candle_type)
+            now = time.monotonic()
+            last = self._no_data_warned.get(key)
+            if last is None or now - last >= self._NO_DATA_WARN_INTERVAL_S:
+                self._no_data_warned[key] = now
+                logger.warning(f"No data found for ({pair}, {timeframe}, {candle_type}).")
         return data
+
+    _NO_DATA_WARN_INTERVAL_S = 300.0
 
     def get_analyzed_dataframe(self, pair: str, timeframe: str) -> tuple[DataFrame, datetime]:
         """
@@ -579,6 +597,15 @@ class DataProvider:
                 except Exception:
                     pass
 
+            # The master had nothing fresh last time we asked: don't re-pull
+            # every cycle while it's behind. Each pull is a full-series JSON
+            # round trip on both sides - measured at ~43% of bot time fleet-wide
+            # while the master's collector was stuck - and a push delivers new
+            # candles the moment the master has them anyway.
+            if time.monotonic() < self._pull_retry_at.get(pair_key, 0.0):
+                remaining.append(pair_key)
+                continue
+
             df = None
             try:
                 df = self._data_server_client.get_ohlcv(pair, timeframe, candle_type.value)
@@ -587,13 +614,17 @@ class DataProvider:
             if df is not None and not df.empty:
                 if df["date"].max().to_pydatetime() >= dt_now() - max_age:
                     self._inject_klines(pair_key, df)
+                    self._pull_retry_at.pop(pair_key, None)
                     continue
                 # Stale - still worth injecting as better-than-nothing (and as a
                 # merge base for whenever the master's next push/pull lands),
                 # but this pair counts as "not fresh" for the caller.
                 self._inject_klines(pair_key, df)
+            self._pull_retry_at[pair_key] = time.monotonic() + self._PULL_RETRY_S
             remaining.append(pair_key)
         return remaining
+
+    _PULL_RETRY_S = 60.0
 
     def refresh(
         self,

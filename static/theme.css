@@ -1,9 +1,118 @@
-/* VulcanTrader shared theme - flat dark terminal.
+/* VulcanTrader shared theme - flat terminal, light by default.
    Loaded after each page's own <style> block, so its !important rules win.
-   Edit here; every page picks it up. */
+   Edit here; every page picks it up.
 
-/* === VulcanTrader flat-dark terminal theme === */
+   Two palettes, one set of variable names:
+     :root                  light (the default skin)
+     :root[data-theme=dark] dark  (opt-in via the nav toggle, see theme.js)
+   theme.js sets data-theme on <html> before first paint and remembers the
+   choice. Nothing below should hardcode a colour that differs between the two -
+   add a variable to both palettes instead. Charts can't read CSS directly, so
+   the --chart-* / status variables are also what theme.js hands to Plotly and
+   lightweight-charts (VulcanTheme.css / VulcanTheme.rgba). */
+
+/* === light (default) === */
 :root {
+    color-scheme: light;
+    --bg:         #f5f6fa;   /* page            */
+    --bg-2:       #ffffff;   /* navbar          */
+    --panel:      #ffffff;   /* cards           */
+    --panel-head: #f1f2f8;   /* card header strip, table head */
+    --panel-2:    #f3f4f9;   /* tiles, inputs   */
+    --panel-3:    #e6e8f2;   /* hover           */
+    --border:     #e1e4ee;
+    --border-2:   #cdd1e0;
+    --chip:       #eef0f7;   /* small square buttons */
+    --chip-brd:   #c4c8d8;
+    --chip-hover: #e0e3f0;
+    --track:      #e9ebf3;   /* recessed groove behind a tab group */
+    --track-brd:  #d8dbe8;
+    --seg-on:     #6a53e6;
+    --seg-on-edge: #7a64f0;  /* active pill: sideways gradient edge   */
+    --seg-on-mid:  #6a53e6;  /* active pill: sideways gradient centre */
+    --text:       #1b1b2f;
+    --text-dim:   #4a4760;
+    --text-mute:  #6b6783;
+    --text-soft:  #6b6783;   /* inline secondary text (was #9891a8 on dark) */
+    --text-faint: #7d788f;   /* inline tertiary text  (was #6f6880 on dark) */
+    --icon:       #5b5774;
+    --pos:        #137a55;
+    --neg:        #c0304a;
+    --neu:        #a15c07;
+    --neu-hover:  #854a03;
+    --info:       #1f6fd1;
+    --accent:     #6a53e6;
+    --accent-txt: #5a42d4;
+    --accent-bg:  rgba(var(--accent-rgb), 0.12);
+    /* channel triplets so tints (rgba(var(--pos-rgb), .12)) follow the palette */
+    --pos-rgb:    19, 122, 85;
+    --neg-rgb:    192, 48, 74;
+    --neu-rgb:    161, 92, 7;
+    --info-rgb:   31, 111, 209;
+    --accent-rgb: 106, 83, 230;
+
+    /* depth: dark leans on heavy shadows, light wants them faint or gone */
+    --card-shadow: 0 1px 2px rgba(20, 20, 60, 0.05);
+    --h3-shadow:   none;
+    --overlay:     rgba(20, 20, 40, 0.45);
+    --brand-grad:  linear-gradient(180deg, #2b2745 0%, #3a3160 45%, #6a53e6 100%);
+    --brand-shadow: none;
+    --btn-shadow:       inset 0 1px 0 rgba(255,255,255,0.25), inset 0 -2px 0 rgba(0,0,0,0.18), 0 1px 2px rgba(20,20,60,0.25);
+    --btn-shadow-hover: inset 0 1px 0 rgba(255,255,255,0.30), inset 0 -2px 0 rgba(0,0,0,0.18), 0 1px 3px rgba(20,20,60,0.30), 0 0 12px rgba(var(--accent-rgb), 0.25);
+    --pill-shadow:      inset 0 1px 0 rgba(255,255,255,0.30), inset 0 -2px 0 rgba(0,0,0,0.18), 0 1px 3px rgba(60,40,160,0.35), 0 0 0 1px rgba(var(--accent-rgb), 0.50);
+    --tz-shadow:        inset 0 1px 0 rgba(255,255,255,0.25), inset 0 -2px 0 rgba(0,0,0,0.18), 0 0 0 1px rgba(var(--accent-rgb), 0.50);
+    --track-inset: inset 0 1px 2px rgba(20, 20, 60, 0.12);
+    --sheen-a: rgba(20, 20, 60, 0.06);
+    --sheen-b: rgba(20, 20, 60, 0.02);
+    --sheen-shadow: inset 0 1px 0 rgba(255,255,255,0.60), inset 0 -2px 0 rgba(20,20,60,0.08);
+    --danger-a: #d4455f;
+    --danger-b: #c23a53;
+    --danger-txt: #ffffff;
+    --danger-brd: rgba(160, 30, 55, 0.50);
+
+    /* lines, fills, scrollbars */
+    --row-line:   rgba(20, 20, 60, 0.07);
+    --bar-track:  rgba(20, 20, 60, 0.09);
+    --tile-bg:    rgba(20, 20, 60, 0.025);
+    --tile-brd:   rgba(20, 20, 60, 0.10);
+    --log-bg:     #f7f8fc;
+    --thumb:      #c9cde0;
+    --thumb-hover: #aeb3cc;
+
+    /* login form: a recessed well in the dark skin, a plain white field here */
+    --login-field-bg:           #ffffff;
+    --login-field-bg-focus:     #ffffff;
+    --login-field-shadow:       inset 0 1px 2px rgba(20, 20, 60, 0.08);
+    --login-field-shadow-focus: inset 0 1px 2px rgba(20, 20, 60, 0.06), 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+    --login-autofill:           #ffffff;
+
+    /* charts (read from JS - see theme.js) */
+    --chart-bg:         #ffffff;
+    --chart-text:       #5b566b;
+    --chart-title:      #5a42d4;
+    --chart-grid:       rgba(20, 20, 60, 0.08);
+    --chart-grid-3d:    rgba(20, 20, 60, 0.12);
+    --chart-zero:       rgba(20, 20, 60, 0.25);
+    --chart-guide:      rgba(20, 20, 60, 0.35);
+    --chart-guide-soft: rgba(20, 20, 60, 0.22);
+    --chart-border:     rgba(20, 20, 60, 0.15);
+    --chart-entry-line: rgba(20, 20, 60, 0.50);
+    --chart-legend-bg:  rgba(255, 255, 255, 0.85);
+    --chart-star-edge:  #1b1b2f;
+    --chart-series-1: #6a53e6;   /* strategy overlay lines, in order */
+    --chart-series-2: #137a55;
+    --chart-series-3: #a15c07;
+    --chart-series-4: #0e7490;
+    --chart-series-5: #be185d;
+    --chart-series-6: #4d7c0f;
+
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --mono: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;  /* no monospace anywhere: kept as an alias of --sans so stray references stay readable */
+}
+
+/* === dark (flat-dark terminal) === */
+:root[data-theme="dark"] {
+    color-scheme: dark;
     --bg:         #11111b;   /* specified - crust  */
     --bg-2:       #181825;   /* mantle             */
     --panel:      #1e1e2e;   /* specified - base   */
@@ -14,23 +123,82 @@
     --border-2:   #45475a;   /* surface1           */
     --chip:       #313244;   /* small square buttons - raised off the header */
     --chip-brd:   #585b70;   /* surface2           */
+    --chip-hover: #45475a;
     --track:      #11111b;   /* recessed groove behind a tab group */
     --track-brd:  #313244;
     --seg-on:     #3e3a5c;
     --seg-on-edge: #4c4678;  /* active pill: sideways gradient edge   */
-    --seg-on-mid:  #3a3559;  /* active pill: sideways gradient centre */   /* raised active pill */
+    --seg-on-mid:  #3a3559;  /* active pill: sideways gradient centre */
     --text:       #e8e5ef;
     --text-dim:   #a9a3bd;
     --text-mute:  #837c9c;
+    --text-soft:  #9891a8;
+    --text-faint: #6f6880;
+    --icon:       #b9b1c9;
     --pos:        #7ee2a8;
     --neg:        #f4879b;
     --neu:        #e3b341;
+    --neu-hover:  #f0c860;
     --info:       #7fb2f7;
     --accent:     #8b7cf6;
     --accent-txt: #cdc4ff;
-    --accent-bg:  rgba(139,124,246,0.22);
-    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    --mono: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;  /* no monospace anywhere: kept as an alias of --sans so stray references stay readable */
+    --accent-bg:  rgba(var(--accent-rgb), 0.22);
+    --pos-rgb:    126, 226, 168;
+    --neg-rgb:    244, 135, 155;
+    --neu-rgb:    227, 179, 65;
+    --info-rgb:   127, 178, 247;
+    --accent-rgb: 139, 124, 246;
+
+    --card-shadow: none;
+    --h3-shadow:   0 1px 2px rgba(0, 0, 0, 0.55), 0 2px 5px rgba(0, 0, 0, 0.30);
+    --overlay:     rgba(0, 0, 0, 0.6);
+    --brand-grad:  linear-gradient(180deg, #ffffff 0%, #f2f2f4 40%, #a8a5b0 100%);
+    --brand-shadow: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+    --btn-shadow:       inset 0 1px 0 rgba(255,255,255,0.14), inset 0 -2px 0 rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.45);
+    --btn-shadow-hover: inset 0 1px 0 rgba(255,255,255,0.18), inset 0 -2px 0 rgba(0,0,0,0.45), 0 1px 3px rgba(0,0,0,0.50), 0 0 12px rgba(var(--accent-rgb), 0.25);
+    --pill-shadow:      inset 0 1px 0 rgba(255,255,255,0.15), inset 0 -2px 0 rgba(0,0,0,0.50), 0 1px 2px rgba(0,0,0,0.55), 0 0 0 1px rgba(var(--accent-rgb), 0.45), 0 0 14px rgba(var(--accent-rgb), 0.28);
+    --tz-shadow:        inset 0 1px 0 rgba(255,255,255,0.14), inset 0 -2px 0 rgba(0,0,0,0.45), 0 0 0 1px rgba(var(--accent-rgb), 0.45);
+    --track-inset: inset 0 1px 2px rgba(0, 0, 0, 0.45);
+    --sheen-a: rgba(255, 255, 255, 0.075);
+    --sheen-b: rgba(255, 255, 255, 0.025);
+    --sheen-shadow: inset 0 1px 0 rgba(255,255,255,0.06), inset 0 -2px 0 rgba(0,0,0,0.30);
+    --danger-a: #6d3547;
+    --danger-b: #562a39;
+    --danger-txt: #ffdbe3;
+    --danger-brd: rgba(244, 135, 155, 0.45);
+
+    --row-line:   rgba(255, 255, 255, 0.04);
+    --bar-track:  rgba(255, 255, 255, 0.07);
+    --tile-bg:    rgba(255, 255, 255, 0.03);
+    --tile-brd:   rgba(255, 255, 255, 0.07);
+    --log-bg:     rgba(0, 0, 0, 0.4);
+    --thumb:      #313244;
+    --thumb-hover: #45475a;
+
+    --login-field-bg:           linear-gradient(180deg, #1a1a28 0%, #21212f 100%);
+    --login-field-bg-focus:     linear-gradient(180deg, #1d1d2c 0%, #252534 100%);
+    --login-field-shadow:       inset 0 2px 4px rgba(0, 0, 0, 0.45), inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+    --login-field-shadow-focus: inset 0 2px 4px rgba(0, 0, 0, 0.40), 0 0 0 3px rgba(var(--accent-rgb), 0.20), 0 0 14px rgba(var(--accent-rgb), 0.12);
+    --login-autofill:           #1e1e2c;
+
+    --chart-bg:         #0d0f13;
+    --chart-text:       #9891a8;
+    --chart-title:      #cdc4ff;
+    --chart-grid:       rgba(255, 255, 255, 0.05);
+    --chart-grid-3d:    rgba(255, 255, 255, 0.08);
+    --chart-zero:       rgba(255, 255, 255, 0.2);
+    --chart-guide:      rgba(255, 255, 255, 0.3);
+    --chart-guide-soft: rgba(255, 255, 255, 0.18);
+    --chart-border:     rgba(255, 255, 255, 0.1);
+    --chart-entry-line: rgba(255, 255, 255, 0.45);
+    --chart-legend-bg:  rgba(0, 0, 0, 0.5);
+    --chart-star-edge:  #ffffff;
+    --chart-series-1: #8b7cf6;
+    --chart-series-2: #7ee2a8;
+    --chart-series-3: #e3b341;
+    --chart-series-4: #5fd0e0;
+    --chart-series-5: #e879a8;
+    --chart-series-6: #b8e06a;
 }
 
 body {
@@ -57,17 +225,18 @@ body {
     font-weight: 700 !important;
     font-size: 1.12rem !important;
     letter-spacing: 0.04em !important;
-    /* White -> grey vertical gradient, painted through the glyphs. The text
+    /* Vertical gradient (--brand-grad: white->grey on dark, ink->violet on
+       light), painted through the glyphs. The text
        itself must be transparent for background-clip:text to show, which is
        also why the shadow below is a filter: text-shadow draws on the (now
        invisible) text colour and would not render at all. */
-    background: linear-gradient(180deg, #ffffff 0%, #f2f2f4 40%, #a8a5b0 100%);
+    background: var(--brand-grad);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
     color: transparent !important;
     text-shadow: none !important;
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+    filter: var(--brand-shadow);
 }
 /* The version tag sits inside .brand, so it would inherit the clipped
    gradient and vanish against some backgrounds - give it a solid colour. */
@@ -104,7 +273,7 @@ body {
                 var(--seg-on-mid) 48%,
                 var(--seg-on-edge) 100%) !important;
     background-blend-mode: normal !important;
-    border: 1px solid rgba(139, 124, 246, 0.40) !important;
+    border: 1px solid rgba(var(--accent-rgb), 0.40) !important;
     border-radius: 7px !important;
     padding: 0.4rem 0.85rem !important;
     min-width: unset !important;
@@ -115,22 +284,17 @@ body {
     text-transform: none !important;
     color: #fff !important;
     text-shadow: none !important;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
-                inset 0 -2px 0 rgba(0, 0, 0, 0.45),
-                0 1px 2px rgba(0, 0, 0, 0.45) !important;
+    box-shadow: var(--btn-shadow) !important;
 }
 .btn:hover:not(:disabled) {
     filter: brightness(1.15) !important;
     transform: none !important;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18),
-                inset 0 -2px 0 rgba(0, 0, 0, 0.45),
-                0 1px 3px rgba(0, 0, 0, 0.50),
-                0 0 12px rgba(139, 124, 246, 0.25) !important;
+    box-shadow: var(--btn-shadow-hover) !important;
 }
 .btn-danger {
-    background: linear-gradient(90deg, #6d3547 0%, #562a39 48%, #6d3547 100%) !important;
-    border-color: rgba(244, 135, 155, 0.45) !important;
-    color: #ffdbe3 !important;
+    background: linear-gradient(90deg, var(--danger-a) 0%, var(--danger-b) 48%, var(--danger-a) 100%) !important;
+    border-color: var(--danger-brd) !important;
+    color: var(--danger-txt) !important;
 }
 .btn-danger:hover:not(:disabled) { filter: brightness(1.15) !important; }
 .btn-logout {
@@ -149,12 +313,12 @@ body {
     background: var(--panel) !important;
     border: 1px solid var(--border) !important;
     border-radius: 10px !important;
-    box-shadow: none !important;
+    box-shadow: var(--card-shadow) !important;
     padding: 1rem 1.1rem !important;
     margin-bottom: 1rem !important;
     overflow: hidden;
 }
-.card:hover { transform: none !important; box-shadow: none !important; }
+.card:hover { transform: none !important; box-shadow: var(--card-shadow) !important; }
 .card h3 {
     position: relative;
     background: var(--panel-head) !important;
@@ -174,8 +338,7 @@ body {
     /* Real text-shadow, not the filter the wordmark needs: this text is a
        solid colour, so the shadow renders normally. Kept tighter and weaker
        than .brand because it repeats on every panel down the page. */
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55),
-                 0 2px 5px rgba(0, 0, 0, 0.30) !important;
+    text-shadow: var(--h3-shadow) !important;
 }
 .card h3::after { display: none !important; }
 /* Only the panel TITLE is Cinzel. The header row also carries values and
@@ -289,10 +452,10 @@ th {
 }
 td {
     color: var(--text) !important;
-    border-bottom: 1px solid rgba(255,255,255,0.035) !important;
+    border-bottom: 1px solid var(--row-line) !important;
     padding: 0.45rem 0.55rem !important;
 }
-tbody tr:hover { background: rgba(139,124,246,0.07) !important; }
+tbody tr:hover { background: rgba(var(--accent-rgb), 0.07) !important; }
 .pair-cell { color: var(--pos) !important; font-weight: 500 !important; }
 .side-long { color: var(--pos) !important; font-weight: 600 !important; }
 .side-short { color: var(--neg) !important; font-weight: 600 !important; }
@@ -305,9 +468,9 @@ tbody tr:hover { background: rgba(139,124,246,0.07) !important; }
     letter-spacing: 0.06em !important;
     padding: 0.15rem 0.45rem !important;
 }
-.badge-open   { background: rgba(126,226,168,0.12) !important; color: var(--pos) !important;      border: 1px solid rgba(126,226,168,0.28) !important; }
+.badge-open   { background: rgba(var(--pos-rgb), 0.12) !important; color: var(--pos) !important;      border: 1px solid rgba(var(--pos-rgb), 0.28) !important; }
 .badge-closed { background: rgba(139,147,163,0.10) !important; color: var(--text-dim) !important; border: 1px solid rgba(139,147,163,0.25) !important; }
-.badge-crashed { background: rgba(227,179,65,0.12) !important; color: var(--neu) !important;      border: 1px solid rgba(227,179,65,0.30) !important; }
+.badge-crashed { background: rgba(var(--neu-rgb), 0.12) !important; color: var(--neu) !important;      border: 1px solid rgba(var(--neu-rgb), 0.30) !important; }
 
 /* ---- icon buttons ---- */
 .icon-btn {
@@ -315,10 +478,10 @@ tbody tr:hover { background: rgba(139,124,246,0.07) !important; }
     border-radius: 5px !important;
     background: var(--chip) !important;
     border: 1px solid var(--chip-brd) !important;
-    color: #b9b1c9 !important;
+    color: var(--icon) !important;
     font-size: 0.897rem !important;
 }
-.icon-btn:hover:not(:disabled) { background: #45475a !important; color: var(--text) !important; border-color: var(--accent) !important; transform: none !important; }
+.icon-btn:hover:not(:disabled) { background: var(--chip-hover) !important; color: var(--text) !important; border-color: var(--accent) !important; transform: none !important; }
 /* Small TEXT button. Deliberately not .icon-btn, which is pinned to 26x24px
    for single-glyph controls and clips any real label. */
 .ind-toggle {
@@ -328,19 +491,19 @@ tbody tr:hover { background: rgba(139,124,246,0.07) !important; }
     border-radius: 5px !important;
     background: var(--chip) !important;
     border: 1px solid var(--chip-brd) !important;
-    color: #b9b1c9 !important;
+    color: var(--icon) !important;
     font-family: var(--sans) !important;
     font-size: 0.7rem !important;
     line-height: 1.4 !important;
     cursor: pointer;
     white-space: nowrap;
 }
-.ind-toggle:hover { background: #45475a !important; color: var(--text) !important; border-color: var(--accent) !important; }
-.icon-btn.success { background: rgba(126,226,168,0.12) !important; border-color: rgba(126,226,168,0.30) !important; color: var(--pos) !important; }
-.icon-btn.danger  { background: rgba(244,135,155,0.12) !important; border-color: rgba(244,135,155,0.30) !important; color: var(--neg) !important; }
-.icon-btn.info    { background: rgba(127,178,247,0.12) !important; border-color: rgba(127,178,247,0.30) !important; color: var(--info) !important; }
-.icon-btn.warn    { background: rgba(227,179,65,0.12) !important;  border-color: rgba(227,179,65,0.30) !important;  color: var(--neu) !important; }
-.icon-btn.accent  { background: var(--accent-bg) !important;       border-color: rgba(139,124,246,0.35) !important; color: var(--accent-txt) !important; }
+.ind-toggle:hover { background: var(--chip-hover) !important; color: var(--text) !important; border-color: var(--accent) !important; }
+.icon-btn.success { background: rgba(var(--pos-rgb), 0.12) !important; border-color: rgba(var(--pos-rgb), 0.30) !important; color: var(--pos) !important; }
+.icon-btn.danger  { background: rgba(var(--neg-rgb), 0.12) !important; border-color: rgba(var(--neg-rgb), 0.30) !important; color: var(--neg) !important; }
+.icon-btn.info    { background: rgba(var(--info-rgb), 0.12) !important; border-color: rgba(var(--info-rgb), 0.30) !important; color: var(--info) !important; }
+.icon-btn.warn    { background: rgba(var(--neu-rgb), 0.12) !important;  border-color: rgba(var(--neu-rgb), 0.30) !important;  color: var(--neu) !important; }
+.icon-btn.accent  { background: var(--accent-bg) !important;       border-color: rgba(var(--accent-rgb), 0.35) !important; color: var(--accent-txt) !important; }
 
 /* ---- forms ---- */
 .form-input, select, textarea {
@@ -351,11 +514,11 @@ tbody tr:hover { background: rgba(139,124,246,0.07) !important; }
     font-family: var(--sans) !important;
     font-size: 0.897rem !important;
 }
-select option { background: #313244; color: #e8e5ef; }
+select option { background: var(--panel-2); color: var(--text); }
 .form-input:focus, select:focus, textarea:focus {
     outline: none !important;
     border-color: var(--accent) !important;
-    box-shadow: 0 0 0 2px rgba(139,124,246,0.18) !important;
+    box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18) !important;
 }
 /* Browser autofill paints its own background (#e8f0fe in Chrome/Edge) and
    ignores `background`, which is why a filled login box went near-white on a
@@ -377,9 +540,9 @@ select:-webkit-autofill {
 }
 input:-webkit-autofill:focus {
     -webkit-box-shadow: 0 0 0 1000px var(--panel-2) inset,
-                        0 0 0 2px rgba(139,124,246,0.18) !important;
+                        0 0 0 2px rgba(var(--accent-rgb), 0.18) !important;
     box-shadow: 0 0 0 1000px var(--panel-2) inset,
-                0 0 0 2px rgba(139,124,246,0.18) !important;
+                0 0 0 2px rgba(var(--accent-rgb), 0.18) !important;
     border-color: var(--accent) !important;
 }
 .toggle-check {
@@ -387,7 +550,7 @@ input:-webkit-autofill:focus {
     background: var(--panel-3) !important;
     border: 1px solid var(--border-2) !important;
 }
-.toggle-check:checked { background: rgba(126,226,168,0.15) !important; border-color: rgba(126,226,168,0.45) !important; }
+.toggle-check:checked { background: rgba(var(--pos-rgb), 0.15) !important; border-color: rgba(var(--pos-rgb), 0.45) !important; }
 .toggle-check:checked::after { border-color: var(--pos) !important; }
 
 /* ---- segmented control: recessed track + raised active pill ---- */
@@ -399,7 +562,7 @@ input:-webkit-autofill:focus {
     background: var(--track);
     border: 1px solid var(--track-brd);
     border-radius: 9px;
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
+    box-shadow: var(--track-inset);
 }
 .seg-track > a,
 .seg-track > button {
@@ -416,12 +579,11 @@ input:-webkit-autofill:focus {
 .seg-track > button:hover {
     /* sideways sheen: brighter at both edges, falling away through the centre */
     background: linear-gradient(90deg,
-                rgba(255, 255, 255, 0.075) 0%,
-                rgba(255, 255, 255, 0.025) 50%,
-                rgba(255, 255, 255, 0.075) 100%) !important;
+                var(--sheen-a) 0%,
+                var(--sheen-b) 50%,
+                var(--sheen-a) 100%) !important;
     color: var(--text) !important;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06),
-                inset 0 -2px 0 rgba(0, 0, 0, 0.30) !important;
+    box-shadow: var(--sheen-shadow) !important;
 }
 .seg-track > a.active,
 .seg-track > button.active {
@@ -433,11 +595,7 @@ input:-webkit-autofill:focus {
     color: #fff !important;
     /* top highlight + bottom emboss give the pill its raised edge, then a
        lift shadow, a violet ring and an outer glow on top of that */
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15),
-                inset 0 -2px 0 rgba(0, 0, 0, 0.50),
-                0 1px 2px rgba(0, 0, 0, 0.55),
-                0 0 0 1px rgba(139, 124, 246, 0.45),
-                0 0 14px rgba(139, 124, 246, 0.28) !important;
+    box-shadow: var(--pill-shadow) !important;
 }
 
 /* ---- chart tab bar ---- */
@@ -558,7 +716,7 @@ input:-webkit-autofill:focus {
 .pc-sel { font-weight: 400; font-size: 0.92rem; color: var(--accent-txt); }
 .pc-sel b { font-weight: 600; color: var(--text); }
 .pc-sel a { color: var(--neu); margin-left: 0.3rem; text-decoration: underline; }
-.pc-sel a:hover { color: #f0c860; }
+.pc-sel a:hover { color: var(--neu-hover); }
 .pc-ohlc {
     display: flex; gap: 0.85rem; flex-wrap: wrap; align-items: baseline;
     font-size: 0.873rem; color: var(--text-mute); margin-bottom: 0.5rem;
@@ -581,7 +739,7 @@ input:-webkit-autofill:focus {
 
 /* ---- selectable trade rows ---- */
 .trow { cursor: pointer; }
-.trow.sel { background: rgba(139,124,246,0.14) !important; box-shadow: inset 2px 0 0 var(--accent); }
+.trow.sel { background: rgba(var(--accent-rgb), 0.14) !important; box-shadow: inset 2px 0 0 var(--accent); }
 
 /* ---- trade detail ---- */
 .td-grid {
@@ -611,8 +769,8 @@ input:-webkit-autofill:focus {
 .status-dot { background: var(--pos) !important; box-shadow: none !important; }
 .status-dot.stopped { background: var(--neg) !important; box-shadow: none !important; }
 .alert {
-    background: rgba(244,135,155,0.08) !important;
-    border: 1px solid rgba(244,135,155,0.30) !important;
+    background: rgba(var(--neg-rgb), 0.08) !important;
+    border: 1px solid rgba(var(--neg-rgb), 0.30) !important;
     border-radius: 8px !important;
     color: var(--neg) !important;
     font-family: var(--sans) !important;
@@ -642,14 +800,14 @@ input:-webkit-autofill:focus {
     text-shadow: none !important;
 }
 .quality-bar {
-    background: rgba(255,255,255,0.07) !important;
+    background: var(--bar-track) !important;
     border-radius: 2px !important;
     height: 5px !important;
 }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: #313244; border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: #45475a; }
+::-webkit-scrollbar-thumb { background: var(--thumb); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--thumb-hover); }
 
 /* ---- login page ---- */
 .login-card {
@@ -669,13 +827,13 @@ input:-webkit-autofill:focus {
     font-size: 1.4rem !important;
     font-weight: 700 !important;
     letter-spacing: 0.04em !important;
-    background: linear-gradient(180deg, #ffffff 0%, #f2f2f4 40%, #a8a5b0 100%);
+    background: var(--brand-grad);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
     color: transparent !important;
     text-shadow: none !important;
-    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.35));
+    filter: var(--brand-shadow);
 }
 .login-header h1 span {
     -webkit-text-fill-color: var(--text-mute);
@@ -696,7 +854,7 @@ input:-webkit-autofill:focus {
                 var(--seg-on-edge) 0%,
                 var(--seg-on-mid) 48%,
                 var(--seg-on-edge) 100%) !important;
-    border: 1px solid rgba(139, 124, 246, 0.40) !important;
+    border: 1px solid rgba(var(--accent-rgb), 0.40) !important;
     border-radius: 6px !important;
     color: #fff !important;
     font-family: var(--sans) !important;
@@ -705,9 +863,7 @@ input:-webkit-autofill:focus {
     text-transform: none !important;
     letter-spacing: 0.02em !important;
     padding: 0.7rem !important;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
-                inset 0 -2px 0 rgba(0, 0, 0, 0.45),
-                0 1px 2px rgba(0, 0, 0, 0.45) !important;
+    box-shadow: var(--btn-shadow) !important;
     text-shadow: none !important;
 }
 .btn-login:hover:not(:disabled) {
@@ -715,8 +871,8 @@ input:-webkit-autofill:focus {
     transform: none !important;
 }
 .login-error {
-    background: rgba(244,135,155,0.08) !important;
-    border: 1px solid rgba(244,135,155,0.30) !important;
+    background: rgba(var(--neg-rgb), 0.08) !important;
+    border: 1px solid rgba(var(--neg-rgb), 0.30) !important;
     border-radius: 6px !important;
     color: var(--neg) !important;
     font-family: var(--sans) !important;
@@ -756,9 +912,7 @@ input:-webkit-autofill:focus {
                 var(--seg-on-edge) 100%);
     border-color: transparent;
     color: #fff;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14),
-                inset 0 -2px 0 rgba(0, 0, 0, 0.45),
-                0 0 0 1px rgba(139, 124, 246, 0.45);
+    box-shadow: var(--tz-shadow);
 }
 
 /* ---- page-specific surfaces (backtester / datamanager) ---- */
@@ -857,6 +1011,10 @@ input:-webkit-autofill:focus {
     transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .bot-actions { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.bot-right { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
+.bot-net { font-size: 0.72rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* compact: it sits in the list header next to a label, not on its own row */
+.bot-sort { padding: 0.2rem 0.45rem !important; font-size: 0.78rem !important; border-radius: 6px !important; }
 
 /* ---- typography: sans everywhere ------------------------------------------
    No monospace anywhere in the UI. Numeric displays get tabular figures
@@ -896,7 +1054,7 @@ th {
     padding: 0.6rem 0.6rem !important;
     line-height: 1.4 !important;
 }
-tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
+tbody tr { border-bottom: 1px solid var(--row-line); }
 .side table { font-size: 0.82rem !important; }
 .side th { font-size: 0.7rem !important; padding: 0.5rem 0.4rem !important; }
 .side td { padding: 0.45rem 0.4rem !important; }
@@ -907,34 +1065,31 @@ tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
    + slightly darker fill than the card) so the field reads as carved into the
    panel rather than sitting flat on it. */
 .login-card .form-input {
-    background: linear-gradient(180deg, #1a1a28 0%, #21212f 100%) !important;
+    background: var(--login-field-bg) !important;
     border: 1px solid var(--border-2) !important;
     border-radius: 8px !important;
     color: var(--text) !important;
     padding: 0.8rem 0.95rem !important;
     font-size: 0.9rem !important;
     letter-spacing: 0.01em;
-    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.45),
-                inset 0 -1px 0 rgba(255, 255, 255, 0.04) !important;
+    box-shadow: var(--login-field-shadow) !important;
     transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease !important;
 }
 .login-card .form-input::placeholder { color: var(--text-mute); opacity: 0.75; }
 .login-card .form-input:hover:not(:focus) { border-color: var(--chip-brd) !important; }
 .login-card .form-input:focus {
-    background: linear-gradient(180deg, #1d1d2c 0%, #252534 100%) !important;
+    background: var(--login-field-bg-focus) !important;
     border-color: var(--accent) !important;
-    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.40),
-                0 0 0 3px rgba(139, 124, 246, 0.20),
-                0 0 14px rgba(139, 124, 246, 0.12) !important;
+    box-shadow: var(--login-field-shadow-focus) !important;
 }
 /* Autofill inside the login card: match the well, not the flat panel colour. */
 .login-card input:-webkit-autofill,
 .login-card input:-webkit-autofill:hover,
 .login-card input:-webkit-autofill:focus {
-    -webkit-box-shadow: 0 0 0 1000px #1e1e2c inset,
-                        inset 0 2px 4px rgba(0, 0, 0, 0.45) !important;
-    box-shadow: 0 0 0 1000px #1e1e2c inset,
-                inset 0 2px 4px rgba(0, 0, 0, 0.45) !important;
+    -webkit-box-shadow: 0 0 0 1000px var(--login-autofill) inset,
+                        var(--login-field-shadow) !important;
+    box-shadow: 0 0 0 1000px var(--login-autofill) inset,
+                var(--login-field-shadow) !important;
 }
 
 /* ---- backtester run panel (backtest / pairs / hyperopt / suite) --------- */
@@ -982,7 +1137,7 @@ tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
 }
 .run-status b { color: var(--text); font-family: var(--mono); }
 .run-log {
-    background: rgba(0,0,0,0.4);
+    background: var(--log-bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.75rem;
@@ -993,8 +1148,8 @@ tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
 
 /* ---- data manager: prebuilt-archive notice ----------------------------- */
 .archive-note {
-    background: rgba(139,124,246,0.08);
-    border: 1px solid rgba(139,124,246,0.30);
+    background: rgba(var(--accent-rgb), 0.08);
+    border: 1px solid rgba(var(--accent-rgb), 0.30);
     border-radius: 8px;
     padding: 0.7rem 0.85rem;
     margin-bottom: 0.9rem;
@@ -1024,14 +1179,14 @@ tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
     background: var(--chip);
     border: 1px solid var(--chip-brd);
     border-radius: 5px;
-    color: #b9b1c9;
+    color: var(--icon);
     cursor: pointer;
     width: 26px; height: 24px;
     font-size: 0.95rem; line-height: 1;
     display: inline-flex; align-items: center; justify-content: center;
     transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
-.side-collapse:hover { background: #45475a; border-color: var(--accent); color: var(--text); }
+.side-collapse:hover { background: var(--chip-hover); border-color: var(--accent); color: var(--text); }
 /* Collapsed: the sidebar keeps a slim rail holding just the toggle, so the
    panel can be brought back - the main column takes the reclaimed width. */
 .layout.side-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
@@ -1052,3 +1207,38 @@ tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
 }
 /* .pos/.neg inside the sub-line keep their own colour, but not the parent's size */
 .metric-sub .pos, .metric-sub .neg { font-size: inherit; font-weight: 600; }
+
+/* Even-rows variant of .metrics-grid. auto-fit packs as many 148px columns as fit,
+   so the trading page's 16 tiles landed as a ragged 6+6+4. Here the column count
+   divides 16 (2 / 4 / 8) and follows the CARD's own width via a container query,
+   not the viewport - the sidebar can be collapsed, which changes the room without
+   changing the window. */
+.metrics-box { container-type: inline-size; }
+.metrics-grid.metrics-even { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+@container (min-width: 400px) { .metrics-grid.metrics-even { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; } }
+@container (min-width: 780px) { .metrics-grid.metrics-even { grid-template-columns: repeat(8, minmax(0, 1fr)) !important; } }
+
+/* Compact tiles (trading page): the stock .metric is sized for a roomy 2-column sidebar and
+   made 16 of them a 400px+ wall above the chart. Small label, value sized by the card's own
+   width (cqw, so it also shrinks when the sidebar is open) and clamped so a figure like
+   +100000.00 still fits an 8-across tile; anything longer wraps instead of overflowing. */
+.metrics-grid.metrics-compact { gap: 0.4rem !important; }
+.metrics-compact .metric { padding: 0.45rem 0.35rem !important; border-radius: 6px !important; min-width: 0; }
+.metrics-compact .metric-label { font-size: 0.6rem !important; letter-spacing: 0.06em !important; margin-bottom: 0.25rem !important; line-height: 1.25; }
+.metrics-compact .metric-value { font-size: clamp(0.82rem, 1.5cqw, 1.15rem) !important; line-height: 1.2; overflow-wrap: anywhere; }
+.metrics-compact .metric-sub { font-size: 0.6rem; margin-top: 0.05rem; }
+
+/* ---- light / dark toggle (navbar + login) ---------------------------------
+   Both glyphs are in the markup; CSS shows the one for the skin you would
+   switch TO (moon while light, sun while dark), so no script has to swap them.
+   The click itself is wired by theme.js via [data-theme-toggle]. */
+.theme-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer;
+}
+.theme-toggle svg { display: block; }
+.theme-toggle .ti-sun { display: none; }
+:root[data-theme="dark"] .theme-toggle .ti-sun { display: block; }
+:root[data-theme="dark"] .theme-toggle .ti-moon { display: none; }
+/* login has no navbar to hold it */
+.theme-toggle.login-theme { position: fixed; top: 1rem; right: 1rem; z-index: 10; }

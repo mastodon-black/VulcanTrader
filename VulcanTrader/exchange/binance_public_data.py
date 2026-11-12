@@ -37,6 +37,155 @@ class BadHttpStatus(Exception):
     pass
 
 
+async def download_archive_funding_rate(
+    pair: str,
+    *,
+    since_ms: int,
+    until_ms: int | None,
+    markets: dict[str, Any],
+    stop_on_404: bool = True,
+) -> DataFrame:
+    """
+    Fetch funding-rate history from https://data.binance.vision's monthly `fundingRate`
+    archive. Same semantics as `download_archive_ohlcv`, but for futures funding rate,
+    which Binance only publishes archives for on a monthly (not daily) cadence.
+    :return: columns date,open,high,low,close,volume where `open` holds the funding rate
+        and the rest are zero, matching Exchange._fetch_funding_rate_history's shape.
+    """
+    try:
+        symbol = markets[pair]["id"]
+
+        start = dt_from_ts(since_ms)
+        end = dt_from_ts(until_ms) if until_ms else dt_now()
+        if start >= end:
+            return DataFrame()
+        df = await _download_archive_funding_rate(symbol, pair, start, end, stop_on_404)
+        logger.debug(
+            f"Downloaded funding rate for {pair} from https://data.binance.vision "
+            f"with length {len(df)}."
+        )
+    except Exception as e:
+        logger.warning(
+            "An exception occurred during fast funding-rate download from Binance, falling "
+            "back to the slower REST API, this can take more time.",
+            exc_info=e,
+        )
+        df = DataFrame()
+
+    if not df.empty:
+        return df.loc[(df["date"] >= start) & (df["date"] < end)]
+    else:
+        return df
+
+
+async def _download_archive_funding_rate(
+    symbol: str,
+    pair: str,
+    start: date,
+    end: date,
+    stop_on_404: bool,
+) -> DataFrame:
+    dfs: list[DataFrame] = []
+
+    connector = aiohttp.TCPConnector(limit=10)
+    async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
+        for i, month in enumerate(month_range(start, end)):
+            try:
+                df = await get_monthly_funding_rate(symbol, month, session)
+            except Http404 as e:
+                if stop_on_404:
+                    logger.debug(f"Failed to download {e.url} due to 404.")
+                    if i == 0:
+                        logger.warning(
+                            f"Fast funding-rate download is unavailable due to missing data: "
+                            f"{e.url}. Falling back to the slower REST API, "
+                            "which may take more time."
+                        )
+                    return concat_safe(dfs)
+                continue
+            except Exception as e:
+                logger.warning(f"An exception raised: {e}")
+                return concat_safe(dfs)
+            else:
+                dfs.append(df)
+    return concat_safe(dfs)
+
+
+def month_range(start: date, end: date):
+    year, month = start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        yield date(year, month, 1)
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+
+
+def binance_vision_funding_rate_zip_name(symbol: str, month: date) -> str:
+    return f"{symbol}-fundingRate-{month.strftime('%Y-%m')}.zip"
+
+
+def binance_vision_funding_rate_zip_url(symbol: str, month: date) -> str:
+    """
+    example url:
+    https://data.binance.vision/data/futures/um/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2023-10.zip
+    """
+    return (
+        f"https://data.binance.vision/data/futures/um/monthly/fundingRate/{symbol}"
+        f"/{binance_vision_funding_rate_zip_name(symbol, month)}"
+    )
+
+
+async def get_monthly_funding_rate(
+    symbol: str,
+    month: date,
+    session: aiohttp.ClientSession,
+    retry_count: int = 3,
+    retry_delay: float = 0.0,
+) -> DataFrame:
+    """
+    Get one month of funding-rate history from https://data.binance.vision
+    :symbol: binance symbol name, e.g. BTCUSDT
+    :month: any date within the target month (UTC); the archive covers the whole month
+    :return: columns date,open,high,low,close,volume where `open` holds the funding rate
+    """
+    url = binance_vision_funding_rate_zip_url(symbol, month)
+    logger.debug(f"download funding rate data from binance: {url}")
+
+    retry = 0
+    while True:
+        if retry > 0:
+            sleep_secs = retry * retry_delay
+            await asyncio.sleep(sleep_secs)
+        try:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    logger.debug(f"Successfully downloaded {url}")
+                    with zipfile.ZipFile(BytesIO(content)) as zipf:
+                        with zipf.open(zipf.namelist()[0]) as csvf:
+                            df = pd.read_csv(csvf)
+                            df = df.rename(
+                                columns={"calc_time": "date", "last_funding_rate": "open"}
+                            )
+                            df["date"] = pd.to_datetime(df["date"], unit="ms", utc=True)
+                            df["high"] = 0
+                            df["low"] = 0
+                            df["close"] = 0
+                            df["volume"] = 0
+                            return df[["date", "open", "high", "low", "close", "volume"]]
+                elif resp.status == 404:
+                    logger.debug(f"Failed to download {url}")
+                    raise Http404(f"404: {url}", month, url)
+                else:
+                    raise BadHttpStatus(f"{resp.status} - {resp.reason}")
+        except Exception as e:
+            retry += 1
+            if isinstance(e, Http404) or retry > retry_count:
+                logger.debug(f"Failed to get data from {url}: {e}")
+                raise
+
+
 async def download_archive_ohlcv(
     candle_type: CandleType,
     pair: str,

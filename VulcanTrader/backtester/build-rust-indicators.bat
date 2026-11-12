@@ -17,4 +17,4 @@ if errorlevel 1 exit /b 1
 for /f "delims=" %%p in ('python -c "import site; print(site.getusersitepackages())"') do set SITE=%%p
 copy /y "target\release\vulcan_rust_indicators.dll" "%SITE%\vulcan_rust_indicators.pyd"
 
-python -c "import vulcan_rust_indicators as vri; needed=['adx','ema','atr','rsi','sma','bollinger_bands','calculate_standard_indicators','compute_result_metrics','fill_missing_candles','run_backtest']; missing=[n for n in needed if n not in dir(vri)]; print('MISSING:', missing) if missing else print('OK - all', len(needed), 'functions present')"
+python -c "import vulcan_rust_indicators as vri; needed=['adx','ema','atr','rsi','sma','bollinger_bands','calculate_standard_indicators','compute_result_metrics','fill_missing_candles','run_backtest','rolling_zscore','multi_pair_backtest','significant_decimals']; missing=[n for n in needed if n not in dir(vri)]; print('MISSING:', missing) if missing else print('OK - all', len(needed), 'functions present')"

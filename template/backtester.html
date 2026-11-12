@@ -3,6 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <script src="/static/theme.js?v=46"></script>
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
@@ -278,7 +279,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/theme.css?v=45">
+    <link rel="stylesheet" href="/static/theme.css?v=46">
 </head>
 <body>
 <div id="app">
@@ -299,6 +300,20 @@
                 </option>
             </select>
             <button class="icon-btn" @click="refreshList" :disabled="loading" title="Refresh">&#8635;</button>
+            <button class="icon-btn theme-toggle" data-theme-toggle title="Switch light / dark theme" aria-label="Switch light / dark theme">
+                <svg class="ti-moon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                </svg>
+                <svg class="ti-sun" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="5"/>
+                    <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                    <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                </svg>
+            </button>
             <button class="icon-btn" @click="logout" title="Logout">
                 <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
                      fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -336,28 +351,28 @@
                          button fits on the same row instead of wrapping onto its own line. -->
                     <div style="display:grid; grid-template-columns: minmax(140px,1fr) minmax(160px,1fr) 190px 150px auto; gap:0.75rem; align-items:end;">
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Config</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Config</label>
                             <select v-model="runForm.config" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="">— select config —</option>
                                 <option v-for="c in configs" :key="c.name" :value="c.name">{{ c.name }}</option>
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Strategy</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Strategy</label>
                             <select v-model="runForm.strategy" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="">— select strategy —</option>
                                 <option v-for="s in strategies" :key="s.name" :value="s.name">{{ s.name }}</option>
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;"
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;"
                                    title="Format: YYYYMMDD-YYYYMMDD (either side may be omitted)">Timerange</label>
                             <input v-model="runForm.timerange" class="form-input" placeholder="20240101-20240601"
                                    title="Format: YYYYMMDD-YYYYMMDD (either side may be omitted)"
                                    style="width:100%; margin-top:0.25rem;">
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Engine</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Engine</label>
                             <select v-model="runForm.engine" class="form-input" style="width:100%; margin-top:0.25rem;"
                                     title="Python = full fidelity. Rust = fast, simplified (no DCA / callbacks / protections).">
                                 <option value="python">Python (full)</option>
@@ -371,7 +386,7 @@
                     </div>
 
                     <div v-if="jobs.length > 0" style="margin-top:1.25rem;">
-                        <h4 style="color:#9891a8; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em; margin:0 0 0.5rem 0;">
+                        <h4 style="color:var(--text-soft); font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em; margin:0 0 0.5rem 0;">
                             Recent Jobs
                         </h4>
                         <div class="table-wrap" style="max-height:260px;">
@@ -383,7 +398,7 @@
                                 <tbody>
                                     <tr v-for="j in jobs" :key="j.id"
                                         @click="selectJob(j.id)"
-                                        :style="{ cursor: 'pointer', background: selectedJobId === j.id ? 'rgba(139,124,246,0.12)' : '' }">
+                                        :style="{ cursor: 'pointer', background: selectedJobId === j.id ? 'rgba(var(--accent-rgb),0.12)' : '' }">
                                         <td><span :style="{ color: jobStatusColor(j.status), fontWeight: 600 }">{{ j.status }}</span></td>
                                         <td>{{ j.config }}</td>
                                         <td>{{ j.strategy || '—' }}</td>
@@ -392,8 +407,8 @@
                                         <td>{{ formatDate(j.finished_at) }}</td>
                                         <td>
                                             <a v-if="j.result_file" href="#" @click.stop.prevent="loadJobResult(j)"
-                                               style="color:#8b7cf6;">{{ j.result_file }}</a>
-                                            <span v-else style="color:#6f6880;">—</span>
+                                               style="color:var(--accent);">{{ j.result_file }}</a>
+                                            <span v-else style="color:var(--text-faint);">—</span>
                                         </td>
                                         <td>
                                             <button v-if="j.status === 'running'" class="icon-btn danger"
@@ -405,14 +420,14 @@
                         </div>
 
                         <div v-if="selectedJob" style="margin-top:0.75rem;">
-                            <div style="display:flex; align-items:center; justify-content:space-between; gap:0.75rem; font-size:0.75rem; color:#9891a8; margin-bottom:0.25rem;">
+                            <div style="display:flex; align-items:center; justify-content:space-between; gap:0.75rem; font-size:0.75rem; color:var(--text-soft); margin-bottom:0.25rem;">
                                 <span>Job log {{ selectedJob.id }} ({{ selectedJob.status }}<span v-if="selectedJob.exit_code !== null && selectedJob.exit_code !== undefined">, exit {{ selectedJob.exit_code }}</span>)</span>
                                 <button class="icon-btn info" @click="toggleJobLogSize"
                                         :title="jobLogExpanded ? 'Collapse log to default height' : 'Expand log to double height'">{{ jobLogExpanded ? '▲' : '▼' }}</button>
                             </div>
                             <pre ref="jobLogPre"
                                  :style="{ maxHeight: jobLogExpanded ? '560px' : '280px' }"
-                                 style="background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:0.75rem; overflow:auto; font-size:0.75rem; line-height:1.4; color:#9891a8; margin:0; white-space:pre-wrap; transition:max-height 0.2s ease;">{{ jobLogText || '(no output yet)' }}</pre>
+                                 style="background:var(--log-bg); border:1px solid var(--border); border-radius:6px; padding:0.75rem; overflow:auto; font-size:0.75rem; line-height:1.4; color:var(--text-soft); margin:0; white-space:pre-wrap; transition:max-height 0.2s ease;">{{ jobLogText || '(no output yet)' }}</pre>
                         </div>
                     </div>
             </div>
@@ -421,25 +436,25 @@
                     <div v-if="pfError" class="alert"><strong>Error:</strong> {{ pfError }}</div>
                     <div style="display:grid; grid-template-columns: repeat(6, 1fr) auto; gap:0.6rem; align-items:end;">
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Config</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Config</label>
                             <select v-model="pfForm.config" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="">— select config —</option>
                                 <option v-for="c in configs" :key="c.name" :value="c.name">{{ c.name }}</option>
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Strategy</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Strategy</label>
                             <select v-model="pfForm.strategy" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="">(from config)</option>
                                 <option v-for="s in strategies" :key="s.name" :value="s.name">{{ s.name }}</option>
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Timerange</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Timerange</label>
                             <input v-model="pfForm.timerange" class="form-input" placeholder="20250101-" style="width:100%; margin-top:0.25rem;">
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Metric</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Metric</label>
                             <select v-model="pfForm.metric" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="composite">composite</option>
                                 <option value="roi">roi</option>
@@ -453,11 +468,11 @@
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Top N</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Top N</label>
                             <input type="number" min="1" max="500" v-model.number="pfForm.top_n" class="form-input" style="width:100%; margin-top:0.25rem;">
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Workers</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Workers</label>
                             <input type="number" min="1" max="16" v-model.number="pfForm.workers" class="form-input" style="width:100%; margin-top:0.25rem;">
                         </div>
                         <button class="btn" @click="startPairsFinder"
@@ -467,13 +482,13 @@
                     </div>
 
                     <div v-if="pfJob" style="margin-top:1rem;">
-                        <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; font-size:0.8rem; color:#9891a8;">
+                        <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; font-size:0.8rem; color:var(--text-soft);">
                             <span>Status: <strong :style="{ color: jobStatusColor(pfJob.status) }">{{ pfJob.status }}</strong></span>
                             <span>Progress: <strong>{{ pfJob.pf_pairs_done }}/{{ pfJob.pf_pairs_total }}</strong>
-                                <span v-if="pfJob.pf_pairs_failed" style="color:#9891a8;">({{ pfJob.pf_pairs_failed }} no-data)</span>
+                                <span v-if="pfJob.pf_pairs_failed" style="color:var(--text-soft);">({{ pfJob.pf_pairs_failed }} no-data)</span>
                             </span>
                             <span v-if="pfJob.pf_metric">Metric: <strong>{{ pfJob.pf_metric }}</strong></span>
-                            <span v-if="pfJob.result_file" style="color:#7ee2a8;">Saved: {{ pfJob.result_file }}</span>
+                            <span v-if="pfJob.result_file" style="color:var(--pos);">Saved: {{ pfJob.result_file }}</span>
                             <button v-if="pfJob.status === 'running'" class="icon-btn danger"
                                     title="Cancel" @click="cancelJob(pfJob.id)">&#9632;</button>
                             <button v-if="pfTopResults.length > 0" class="btn"
@@ -481,9 +496,9 @@
                                     @click="copyPfWhitelist">Copy whitelist (top {{ pfForm.top_n }})</button>
                         </div>
                         <div v-if="pfJob.pf_pairs_total"
-                             style="margin-top:0.5rem; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                             style="margin-top:0.5rem; height:6px; background:var(--bar-track); border-radius:3px; overflow:hidden;">
                             <div :style="{ width: ((pfJob.pf_pairs_done / pfJob.pf_pairs_total) * 100) + '%',
-                                           height: '100%', background: '#8b7cf6', transition: 'width 0.3s' }"></div>
+                                           height: '100%', background: 'var(--accent)', transition: 'width 0.3s' }"></div>
                         </div>
                     </div>
 
@@ -501,7 +516,7 @@
                                         <td>{{ i + 1 }}</td>
                                         <td>{{ r.pair }}</td>
                                         <td>{{ r.trades }}</td>
-                                        <td :style="{ color: r.total_profit_pct >= 0 ? '#7ee2a8' : '#f4879b' }">
+                                        <td :style="{ color: r.total_profit_pct >= 0 ? 'var(--pos)' : 'var(--neg)' }">
                                             {{ (+r.total_profit_pct).toFixed(2) }}
                                         </td>
                                         <td>{{ (+r.avg_profit_pct).toFixed(2) }}</td>
@@ -520,8 +535,8 @@
                     </div>
 
                     <details v-if="pfJob && pfJobLog" style="margin-top:0.75rem;">
-                        <summary style="font-size:0.75rem; color:#9891a8; cursor:pointer;">Pairs-finder log</summary>
-                        <pre style="background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:0.6rem; max-height:240px; overflow:auto; font-size:0.72rem; line-height:1.4; color:#9891a8; margin:0.4rem 0 0; white-space:pre-wrap;">{{ pfJobLog }}</pre>
+                        <summary style="font-size:0.75rem; color:var(--text-soft); cursor:pointer;">Pairs-finder log</summary>
+                        <pre style="background:var(--log-bg); border:1px solid var(--border); border-radius:6px; padding:0.6rem; max-height:240px; overflow:auto; font-size:0.72rem; line-height:1.4; color:var(--text-soft); margin:0.4rem 0 0; white-space:pre-wrap;">{{ pfJobLog }}</pre>
                     </details>
             </div>
 
@@ -531,25 +546,25 @@
                     <!-- Row 1: config / strategy / timerange / epochs -->
                     <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap:0.6rem; align-items:end; margin-bottom:0.6rem;">
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Config</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Config</label>
                             <select v-model="hoForm.config" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="">— select config —</option>
                                 <option v-for="c in configs" :key="c.name" :value="c.name">{{ c.name }}</option>
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Strategy</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Strategy</label>
                             <select v-model="hoForm.strategy" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="">(from config)</option>
                                 <option v-for="s in strategies" :key="s.name" :value="s.name">{{ s.name }}</option>
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Timerange</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Timerange</label>
                             <input v-model="hoForm.timerange" class="form-input" placeholder="20250101-" style="width:100%; margin-top:0.25rem;">
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;" title="Number of optimisation epochs to run">Epochs</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;" title="Number of optimisation epochs to run">Epochs</label>
                             <input type="number" min="1" max="100000" v-model.number="hoForm.epochs" class="form-input" style="width:100%; margin-top:0.25rem;">
                         </div>
                     </div>
@@ -557,7 +572,7 @@
                     <!-- Row 2: loss / spaces / jobs / min-trades -->
                     <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap:0.6rem; align-items:end; margin-bottom:0.6rem;">
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;" title="Loss function used to rank epochs">Loss function</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;" title="Loss function used to rank epochs">Loss function</label>
                             <select v-model="hoForm.hyperopt_loss" class="form-input" style="width:100%; margin-top:0.25rem;">
                                 <option value="SharpeHyperOptLossDaily">SharpeHyperOptLossDaily</option>
                                 <option value="SharpeHyperOptLoss">SharpeHyperOptLoss</option>
@@ -573,37 +588,37 @@
                             </select>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;" title="Search spaces to optimise">Spaces</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;" title="Search spaces to optimise">Spaces</label>
                             <div style="margin-top:0.25rem; display:flex; flex-wrap:wrap; gap:0.35rem;">
                                 <label v-for="sp in hoSpaceOptions" :key="sp"
-                                       style="display:flex; align-items:center; gap:0.25rem; font-size:0.78rem; color:#9891a8; cursor:pointer; white-space:nowrap;">
-                                    <input type="checkbox" :value="sp" v-model="hoForm.spaces" style="accent-color:#8b7cf6;">
+                                       style="display:flex; align-items:center; gap:0.25rem; font-size:0.78rem; color:var(--text-soft); cursor:pointer; white-space:nowrap;">
+                                    <input type="checkbox" :value="sp" v-model="hoForm.spaces" style="accent-color:var(--accent);">
                                     {{ sp }}
                                 </label>
                             </div>
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;" title="Parallel workers (-1 = all CPUs)">Workers (jobs)</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;" title="Parallel workers (-1 = all CPUs)">Workers (jobs)</label>
                             <input type="number" min="-1" max="64" v-model.number="hoForm.jobs" class="form-input" style="width:100%; margin-top:0.25rem;">
                         </div>
                         <div>
-                            <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;" title="Discard epochs with fewer trades than this">Min trades</label>
+                            <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;" title="Discard epochs with fewer trades than this">Min trades</label>
                             <input type="number" min="1" max="10000" v-model.number="hoForm.min_trades" class="form-input" style="width:100%; margin-top:0.25rem;">
                         </div>
                     </div>
 
                     <!-- Row 3: flags + submit -->
                     <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap;">
-                        <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.8rem; color:#9891a8; cursor:pointer;" title="Re-run populate_indicators every epoch (slower, more accurate)">
-                            <input type="checkbox" v-model="hoForm.analyze_per_epoch" style="accent-color:#8b7cf6;">
+                        <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.8rem; color:var(--text-soft); cursor:pointer;" title="Re-run populate_indicators every epoch (slower, more accurate)">
+                            <input type="checkbox" v-model="hoForm.analyze_per_epoch" style="accent-color:var(--accent);">
                             Analyze per epoch
                         </label>
-                        <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.8rem; color:#9891a8; cursor:pointer;" title="Print every epoch result, not just improvements">
-                            <input type="checkbox" v-model="hoForm.print_all" style="accent-color:#8b7cf6;">
+                        <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.8rem; color:var(--text-soft); cursor:pointer;" title="Print every epoch result, not just improvements">
+                            <input type="checkbox" v-model="hoForm.print_all" style="accent-color:var(--accent);">
                             Print all
                         </label>
-                        <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.8rem; color:#9891a8; cursor:pointer;" title="Strip ANSI colour codes from output">
-                            <input type="checkbox" v-model="hoForm.no_color" style="accent-color:#8b7cf6;" :checked="true">
+                        <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.8rem; color:var(--text-soft); cursor:pointer;" title="Strip ANSI colour codes from output">
+                            <input type="checkbox" v-model="hoForm.no_color" style="accent-color:var(--accent);" :checked="true">
                             No colour
                         </label>
                         <button class="btn" @click="startHyperopt"
@@ -616,7 +631,7 @@
 
                     <!-- Job status + progress -->
                     <div v-if="hoJob" style="margin-top:0.9rem;">
-                        <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; font-size:0.8rem; color:#9891a8;">
+                        <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; font-size:0.8rem; color:var(--text-soft);">
                             <span>Status: <strong :style="{ color: jobStatusColor(hoJob.status) }">{{ hoJob.status }}</strong></span>
                             <span v-if="hoJob.ho_epoch !== undefined">
                                 Epoch: <strong>{{ hoJob.ho_epoch }}</strong><span v-if="hoJob.ho_total"> / {{ hoJob.ho_total }}</span>
@@ -624,19 +639,19 @@
                             <span v-if="hoJob.ho_best_loss !== undefined && hoJob.ho_best_loss !== null" class="pos">
                                 Best loss: <strong>{{ (+hoJob.ho_best_loss).toFixed(4) }}</strong>
                             </span>
-                            <span v-if="hoJob.result_file" style="color:#7ee2a8;">Done: {{ hoJob.result_file }}</span>
+                            <span v-if="hoJob.result_file" style="color:var(--pos);">Done: {{ hoJob.result_file }}</span>
                         </div>
                         <div v-if="hoJob.ho_total && hoJob.ho_epoch"
-                             style="margin-top:0.4rem; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
+                             style="margin-top:0.4rem; height:6px; background:var(--bar-track); border-radius:3px; overflow:hidden;">
                             <div :style="{ width: Math.min(100, (hoJob.ho_epoch / hoJob.ho_total) * 100) + '%',
-                                           height: '100%', background: '#8b7cf6', transition: 'width 0.3s' }"></div>
+                                           height: '100%', background: 'var(--accent)', transition: 'width 0.3s' }"></div>
                         </div>
                     </div>
 
                     <!-- Log -->
                     <details v-if="hoJob && hoJobLog" style="margin-top:0.75rem;" :open="hoRunning">
-                        <summary style="font-size:0.75rem; color:#9891a8; cursor:pointer;">Hyperopt log</summary>
-                        <pre ref="hoLogPre" style="background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:0.6rem; max-height:360px; overflow:auto; font-size:0.72rem; line-height:1.4; color:#9891a8; margin:0.4rem 0 0; white-space:pre-wrap;">{{ hoJobLog }}</pre>
+                        <summary style="font-size:0.75rem; color:var(--text-soft); cursor:pointer;">Hyperopt log</summary>
+                        <pre ref="hoLogPre" style="background:var(--log-bg); border:1px solid var(--border); border-radius:6px; padding:0.6rem; max-height:360px; overflow:auto; font-size:0.72rem; line-height:1.4; color:var(--text-soft); margin:0.4rem 0 0; white-space:pre-wrap;">{{ hoJobLog }}</pre>
                     </details>
             </div>
 
@@ -697,7 +712,7 @@
 
 
         <div v-if="!loading && trades.length === 0 && !error" class="card">
-            <p style="color:#9891a8; text-align:center; margin:0;">
+            <p style="color:var(--text-soft); text-align:center; margin:0;">
                 Select a backtest result from the dropdown above to view performance analytics.
             </p>
         </div>
@@ -827,8 +842,8 @@
                     <div style="display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:0.5rem;">
                         <div class="metric-label" style="margin-bottom:0;">Volatility Bias</div>
                         <span style="display:flex; gap:0.5rem; align-items:center; font-family:system-ui; font-weight:400;">
-                            <span v-if="volatilityBias && !volBiasLoading" style="font-size:0.7rem; color:#9891a8;">
-                                Vol pair: <strong style="color:#8b7cf6;">{{ volatilityBias.vol_pair }}</strong>
+                            <span v-if="volatilityBias && !volBiasLoading" style="font-size:0.7rem; color:var(--text-soft);">
+                                Vol pair: <strong style="color:var(--accent);">{{ volatilityBias.vol_pair }}</strong>
                             </span>
                             <select v-model="volBiasPair" class="form-input" style="font-size:0.75rem; min-width:160px;">
                                 <option value="__all__">ALL (each pair's own vol)</option>
@@ -847,7 +862,7 @@
                     <div v-if="volBiasLoading" class="loading"><span class="spinner"></span> Running volatility analysis…</div>
 
                     <template v-if="!volatilityBias && !volBiasLoading && !volBiasError">
-                        <p style="color:#9891a8; margin:0.5rem 0 0;">
+                        <p style="color:var(--text-soft); margin:0.5rem 0 0;">
                             Click <strong>Analyze</strong> to classify entries by ambient market volatility.
                         </p>
                     </template>
@@ -855,21 +870,21 @@
                     <template v-if="volatilityBias && !volBiasLoading">
                         <div class="metric-value" :class="volBiasClass">
                             {{ volatilityBias.label }}
-                            <span v-if="volatilityBias.p_value != null" style="font-size:0.7rem; color:#9891a8;">
+                            <span v-if="volatilityBias.p_value != null" style="font-size:0.7rem; color:var(--text-soft);">
                                 (p = {{ volatilityBias.p_value.toFixed(3) }},
                                 {{ volatilityBias.high_points }}/4 metrics favor high-vol,
                                 n = {{ volatilityBias.n }})
                             </span>
                         </div>
                         <div v-if="volatilityBias.label === 'Inconclusive'"
-                             style="font-size:0.68rem; color:#9891a8; margin-top:0.4rem;">
+                             style="font-size:0.68rem; color:var(--text-soft); margin-top:0.4rem;">
                             The gap in mean return per trade
                             ({{ volatilityBias.effect_size_pct > 0 ? '+' : '' }}{{ volatilityBias.effect_size_pct == null ? '–' : volatilityBias.effect_size_pct.toFixed(3) }}%
                             high-vol vs calm) is not distinguishable from chance at
                             p &lt; {{ volatilityBias.alpha }} — this strategy shows no
                             reliable volatility preference on this sample.
                         </div>
-                        <div v-if="volatilityBias.p_value != null" style="font-size:0.68rem; color:#9891a8; margin-top:0.6rem;">
+                        <div v-if="volatilityBias.p_value != null" style="font-size:0.68rem; color:var(--text-soft); margin-top:0.6rem;">
                             High-vol entries vs calm entries (per-trade, so bucket size doesn't tilt the comparison):
                         </div>
                         <div v-if="volatilityBias.p_value != null" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:0.5rem; margin-top:0.35rem;">
@@ -898,7 +913,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div v-if="volatilityBias.p_value != null" style="font-size:0.64rem; color:#6f6880; margin-top:0.5rem;">
+                        <div v-if="volatilityBias.p_value != null" style="font-size:0.64rem; color:var(--text-faint); margin-top:0.5rem;">
                             Cumulative over each bucket (shown for reference, not compared — these scale
                             with trade count: {{ volatilityBias.per_bucket_metrics.HIGH_VOL.trades }} high-vol
                             vs {{ volatilityBias.per_bucket_metrics.LOW_VOL.trades }} calm):
@@ -974,7 +989,7 @@
                 <h3>
                     Best / Worst Pairs
                     <span style="display:flex; align-items:center; gap:0.6rem; font-weight:400;">
-                        <span style="font-size:0.8rem; color:#9891a8;">{{ pairs.length }} pairs traded</span>
+                        <span style="font-size:0.8rem; color:var(--text-soft);">{{ pairs.length }} pairs traded</span>
                         <select class="form-input" style="width:auto; padding:0.25rem 0.5rem; font-size:0.8rem;"
                                 v-model.number="pairsLimit" title="How many pairs to list in each table">
                             <option :value="10">Top 10</option>
@@ -1051,7 +1066,7 @@
                 <h3>
                     Trades ({{ enrichedTrades.length }})
                     <span style="display:flex; align-items:center; gap:0.75rem; font-weight:400;">
-                        <label style="font-size:0.8rem; color:#9891a8; display:flex; align-items:center; gap:0.4rem; cursor:pointer; white-space:nowrap;">
+                        <label style="font-size:0.8rem; color:var(--text-soft); display:flex; align-items:center; gap:0.4rem; cursor:pointer; white-space:nowrap;">
                             Show exit reason
                             <input type="checkbox" class="toggle-check" v-model="showExitReason">
                         </label>
@@ -1104,7 +1119,7 @@
                         Load all {{ filteredTradesTotal }}
                     </button>
                 </div>
-                <div v-else-if="filteredTradesTotal > 0" style="text-align:center;margin-top:0.75rem;color:#9891a8;font-size:0.85rem;">
+                <div v-else-if="filteredTradesTotal > 0" style="text-align:center;margin-top:0.75rem;color:var(--text-soft);font-size:0.85rem;">
                     Showing all {{ filteredTradesTotal }} trades
                 </div>
             </div>
@@ -1114,8 +1129,8 @@
                 <h3>
                     Regime Analysis
                     <span style="display:flex; gap:0.5rem; align-items:center; font-family:system-ui; font-weight:400;">
-                        <span v-if="regimeAnalysis && !regimeLoading" style="font-size:0.72rem; color:#9891a8;">
-                            Regime pair: <strong style="color:#8b7cf6;">{{ regimeAnalysis.regime_pair }}</strong>
+                        <span v-if="regimeAnalysis && !regimeLoading" style="font-size:0.72rem; color:var(--text-soft);">
+                            Regime pair: <strong style="color:var(--accent);">{{ regimeAnalysis.regime_pair }}</strong>
                             &nbsp;·&nbsp; {{ regimeAnalysis.timeframe }}
                         </span>
                         <select v-model="regimePair" class="form-input" style="font-size:0.8rem; min-width:180px;">
@@ -1134,7 +1149,7 @@
                 <div v-if="regimeLoading" class="loading"><span class="spinner"></span> Running regime analysis…</div>
 
                 <template v-if="!regimeAnalysis && !regimeLoading && !regimeError">
-                    <p style="color:#9891a8; text-align:center; margin:0.5rem 0 0.25rem;">
+                    <p style="color:var(--text-soft); text-align:center; margin:0.5rem 0 0.25rem;">
                         Click <strong>Analyze</strong> to classify market regimes and view per-regime metrics.
                     </p>
                 </template>
@@ -1152,9 +1167,9 @@
                                 opacity: selectedRegime !== null && selectedRegime !== r ? 0.3 : 1,
                                 transition: 'all 0.15s',
                             }">
-                            <div :style="{ width:'10px', height:'10px', borderRadius:'2px', background: (regimeColors[r] || {}).solid || '#9891a8', flexShrink:0 }"></div>
-                            <span style="font-size:0.78rem; font-weight:500; letter-spacing:0.03em;" :style="{ color: (regimeColors[r] || {}).text || '#e8e5ef' }">{{ r.replace(/_/g, ' ') }}</span>
-                            <span style="font-size:0.72rem; color:#6f6880;">({{ regimeAnalysis.per_regime_metrics[r].trades }})</span>
+                            <div :style="{ width:'10px', height:'10px', borderRadius:'2px', background: (regimeColors[r] || {}).solid || 'var(--text-soft)', flexShrink:0 }"></div>
+                            <span style="font-size:0.78rem; font-weight:500; letter-spacing:0.03em;" :style="{ color: (regimeColors[r] || {}).text || 'var(--text)' }">{{ r.replace(/_/g, ' ') }}</span>
+                            <span style="font-size:0.72rem; color:var(--text-faint);">({{ regimeAnalysis.per_regime_metrics[r].trades }})</span>
                         </button>
                     </div>
 
@@ -1221,8 +1236,8 @@
                 <h3>
                     MAE / MFE Analysis
                     <span style="display:flex; gap:0.5rem; align-items:center; font-family:system-ui; font-weight:400;">
-                        <span v-if="maeMfe && !maeMfeLoading" style="font-size:0.72rem; color:#9891a8;">
-                            Regime pair: <strong style="color:#8b7cf6;">{{ maeMfe.regime_pair }}</strong>
+                        <span v-if="maeMfe && !maeMfeLoading" style="font-size:0.72rem; color:var(--text-soft);">
+                            Regime pair: <strong style="color:var(--accent);">{{ maeMfe.regime_pair }}</strong>
                             &nbsp;·&nbsp; {{ maeMfe.timeframe }}
                             &nbsp;·&nbsp; {{ (maeMfe.global || {}).total || 0 }} trades
                         </span>
@@ -1251,18 +1266,18 @@
                 <div v-if="maeMfeLoading" class="loading"><span class="spinner"></span> Computing MAE / MFE…</div>
 
                 <!-- === Explanations === -->
-                <div v-if="maeMfeHelp" style="background:rgba(139,124,246,0.07); border:1px solid rgba(139,124,246,0.25); border-radius:8px; padding:1rem 1.25rem; margin-bottom:1.25rem; font-size:0.82rem; line-height:1.55; color:#e8e5ef;">
-                    <div style="font-weight:700; color:#cdc4ff; margin-bottom:0.5rem; font-size:0.9rem;">How to read this analysis</div>
-                    <p style="margin:0.3rem 0;"><strong style="color:#7ee2a8;">MFE</strong> (Maximum Favorable Excursion) = how far price moved <em>in your favor</em> at the best point of the trade, % (leverage-adjusted). <strong style="color:#f4879b;">MAE</strong> (Maximum Adverse Excursion) = how far it moved <em>against you</em> at the worst point. Both are taken from each trade's recorded <code>min_rate</code>/<code>max_rate</code>, so they describe the heat and the runway every trade actually had, regardless of where it eventually exited.</p>
-                    <p style="margin:0.3rem 0;"><strong>Scatter (MAE → x, MFE → y).</strong> Each dot is one trade. <span style="color:#7ee2a8;">Green = win</span>, <span style="color:#f4879b;">red = loss</span>. Dots high & to the left (high MFE, low MAE) are clean trades; dots low & to the right gave a lot of heat for little reward. The dashed <strong>MAE = MFE</strong> diagonal is the break-even line for excursions.</p>
-                    <p style="margin:0.3rem 0;"><strong>Clusters (★).</strong> K-Means groups trades by their (MAE, MFE) shape to reveal natural setup "types". The <strong style="color:#e3b341;">dominant cluster</strong> is the one maximizing <em>expectancy × size</em> (quality × frequency), not just the biggest. <em>Note:</em> because MAE/MFE are realized outcomes, clusters naturally sort toward win/loss. A near-100% win-rate cluster is normal, not a bug.</p>
-                    <p style="margin:0.3rem 0;">The two highlighted recommendation tiles in the overall view: <strong style="color:#cdc4ff;">Recommended MFE % (TP)</strong> = middle (centroid) of the dominant cluster's MFE band, so the favorable-excursion take-profit level where your best repeating setup tends to run to. <strong style="color:#f4879b;">Recommended MAE % (SL)</strong> = middle (centroid) of the dominant cluster's MAE band, the adverse-excursion stop level, the typical heat that setup endures, so a stop there shouldn't cut your good trades. Switch the <strong>View</strong> dropdown to a regime to get that regime's own recommended MFE % / MAE %.</p>
-                    <p style="margin:0.3rem 0;"><strong style="color:#cdc4ff;">Recommended Per-Regime MAE / MFE %, the main output.</strong> The market at each trade's entry is classified (via regime_analysis: trend EMAs + ADX) into EXTREME_BULL…EXTREME_BEAR. For <em>each</em> regime we derive two dynamic excursion percentages from that regime's own trades: <strong style="color:#e3b341;">Recommended MFE %</strong> = the favorable-excursion <em>take-profit</em> level, taken from the regime's MFE distribution; <strong style="color:#f4879b;">Recommended MAE %</strong> = the adverse-excursion <em>stop-loss</em> level, taken from the regime's MAE distribution. Within those distributions we pick the (MFE %, MAE %) pair that <strong>maximises expectancy</strong>, so each is grounded in real excursions and optimised, not a raw median.  The bracketed "reached by / hit by %" shows how often each level is actually touched in that regime. These are exactly the base MAE %/MFE % to use in your MAE SLs & MFE TPs. Regimes with under 30 trades are flagged <span style="color:#e3b341;">⚠</span> (optimum unreliable). In-sample fits confirm with a backtest.</p>
-                    <p style="margin:0.3rem 0 0; color:#9891a8; font-style:italic;">Caveat: MAE/MFE carry no intra-trade ordering, so we can't know whether the high or the low came first. The TP model therefore slightly over-credits TP hits (a trade could have hit its SL before reaching its MFE). Treat the numbers as a well-grounded guide, then confirm with a backtest using the chosen TP/SL.</p>
+                <div v-if="maeMfeHelp" style="background:rgba(var(--accent-rgb),0.07); border:1px solid rgba(var(--accent-rgb),0.25); border-radius:8px; padding:1rem 1.25rem; margin-bottom:1.25rem; font-size:0.82rem; line-height:1.55; color:var(--text);">
+                    <div style="font-weight:700; color:var(--accent-txt); margin-bottom:0.5rem; font-size:0.9rem;">How to read this analysis</div>
+                    <p style="margin:0.3rem 0;"><strong style="color:var(--pos);">MFE</strong> (Maximum Favorable Excursion) = how far price moved <em>in your favor</em> at the best point of the trade, % (leverage-adjusted). <strong style="color:var(--neg);">MAE</strong> (Maximum Adverse Excursion) = how far it moved <em>against you</em> at the worst point. Both are taken from each trade's recorded <code>min_rate</code>/<code>max_rate</code>, so they describe the heat and the runway every trade actually had, regardless of where it eventually exited.</p>
+                    <p style="margin:0.3rem 0;"><strong>Scatter (MAE → x, MFE → y).</strong> Each dot is one trade. <span style="color:var(--pos);">Green = win</span>, <span style="color:var(--neg);">red = loss</span>. Dots high & to the left (high MFE, low MAE) are clean trades; dots low & to the right gave a lot of heat for little reward. The dashed <strong>MAE = MFE</strong> diagonal is the break-even line for excursions.</p>
+                    <p style="margin:0.3rem 0;"><strong>Clusters (★).</strong> K-Means groups trades by their (MAE, MFE) shape to reveal natural setup "types". The <strong style="color:var(--neu);">dominant cluster</strong> is the one maximizing <em>expectancy × size</em> (quality × frequency), not just the biggest. <em>Note:</em> because MAE/MFE are realized outcomes, clusters naturally sort toward win/loss. A near-100% win-rate cluster is normal, not a bug.</p>
+                    <p style="margin:0.3rem 0;">The two highlighted recommendation tiles in the overall view: <strong style="color:var(--accent-txt);">Recommended MFE % (TP)</strong> = middle (centroid) of the dominant cluster's MFE band, so the favorable-excursion take-profit level where your best repeating setup tends to run to. <strong style="color:var(--neg);">Recommended MAE % (SL)</strong> = middle (centroid) of the dominant cluster's MAE band, the adverse-excursion stop level, the typical heat that setup endures, so a stop there shouldn't cut your good trades. Switch the <strong>View</strong> dropdown to a regime to get that regime's own recommended MFE % / MAE %.</p>
+                    <p style="margin:0.3rem 0;"><strong style="color:var(--accent-txt);">Recommended Per-Regime MAE / MFE %, the main output.</strong> The market at each trade's entry is classified (via regime_analysis: trend EMAs + ADX) into EXTREME_BULL…EXTREME_BEAR. For <em>each</em> regime we derive two dynamic excursion percentages from that regime's own trades: <strong style="color:var(--neu);">Recommended MFE %</strong> = the favorable-excursion <em>take-profit</em> level, taken from the regime's MFE distribution; <strong style="color:var(--neg);">Recommended MAE %</strong> = the adverse-excursion <em>stop-loss</em> level, taken from the regime's MAE distribution. Within those distributions we pick the (MFE %, MAE %) pair that <strong>maximises expectancy</strong>, so each is grounded in real excursions and optimised, not a raw median.  The bracketed "reached by / hit by %" shows how often each level is actually touched in that regime. These are exactly the base MAE %/MFE % to use in your MAE SLs & MFE TPs. Regimes with under 30 trades are flagged <span style="color:var(--neu);">⚠</span> (optimum unreliable). In-sample fits confirm with a backtest.</p>
+                    <p style="margin:0.3rem 0 0; color:var(--text-soft); font-style:italic;">Caveat: MAE/MFE carry no intra-trade ordering, so we can't know whether the high or the low came first. The TP model therefore slightly over-credits TP hits (a trade could have hit its SL before reaching its MFE). Treat the numbers as a well-grounded guide, then confirm with a backtest using the chosen TP/SL.</p>
                 </div>
 
                 <template v-if="!maeMfe && !maeMfeLoading && !maeMfeError">
-                    <p style="color:#9891a8; text-align:center; margin:0.5rem 0 0.25rem;">
+                    <p style="color:var(--text-soft); text-align:center; margin:0.5rem 0 0.25rem;">
                         Click <strong>Analyze</strong> to view MAE/MFE distribution, K-Means clusters, and optimal TP/SL recommendations.
                     </p>
                 </template>
@@ -1270,14 +1285,14 @@
                 <template v-if="maeMfe && !maeMfeLoading">
                     <!-- View selector (overall vs per-regime) -->
                     <div v-if="maeMfeRegimeOptions.length" style="display:flex; align-items:center; gap:0.6rem; margin-bottom:0.85rem;">
-                        <span style="font-size:0.78rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">View</span>
+                        <span style="font-size:0.78rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">View</span>
                         <select v-model="maeMfeView" class="form-input" style="font-size:0.82rem; min-width:200px;">
                             <option value="__all__">All regimes (overall)</option>
                             <option v-for="r in maeMfeRegimeOptions" :key="r" :value="r">
                                 {{ r.replace(/_/g, ' ') }} ({{ maeMfe.per_regime[r].count }} trades)
                             </option>
                         </select>
-                        <span v-if="maeMfeView !== '__all__'" style="font-size:0.72rem; color:#6f6880;">
+                        <span v-if="maeMfeView !== '__all__'" style="font-size:0.72rem; color:var(--text-faint);">
                             Metrics &amp; scatter below are filtered to this regime.
                         </span>
                     </div>
@@ -1303,34 +1318,34 @@
 
                         <!-- Overall view: cluster-based recommendations -->
                         <template v-if="maeMfeView === '__all__'">
-                            <div class="metric-mini" style="border: 1px solid rgba(167,139,250,0.4); background:rgba(167,139,250,0.07);"
+                            <div class="metric-mini" style="border: 1px solid rgba(var(--accent-rgb),0.4); background:rgba(var(--accent-rgb),0.07);"
                                  title="Recommended MFE % (take-profit): middle of the dominant K-Means MFE band (chosen by expectancy × frequency)">
-                                <div class="metric-mini-label" style="color:#cdc4ff;">Rec. MFE % (TP)</div>
-                                <div class="metric-mini-value" style="color:#cdc4ff;">{{ maeMfe.recommended_tp != null ? maeMfe.recommended_tp.toFixed(2) + '%' : '—' }}</div>
+                                <div class="metric-mini-label" style="color:var(--accent-txt);">Rec. MFE % (TP)</div>
+                                <div class="metric-mini-value" style="color:var(--accent-txt);">{{ maeMfe.recommended_tp != null ? maeMfe.recommended_tp.toFixed(2) + '%' : '—' }}</div>
                             </div>
-                            <div class="metric-mini" style="border: 1px solid rgba(244,135,155,0.35); background:rgba(244,135,155,0.06);"
+                            <div class="metric-mini" style="border: 1px solid rgba(var(--neg-rgb),0.35); background:rgba(var(--neg-rgb),0.06);"
                                  title="Recommended MAE % (stop-loss): middle of the dominant K-Means MAE band (typical adverse heat of the best repeating setup)">
-                                <div class="metric-mini-label" style="color:#f4879b;">Rec. MAE % (SL)</div>
-                                <div class="metric-mini-value" style="color:#f4879b;">{{ maeMfe.recommended_sl != null ? maeMfe.recommended_sl.toFixed(2) + '%' : '—' }}</div>
+                                <div class="metric-mini-label" style="color:var(--neg);">Rec. MAE % (SL)</div>
+                                <div class="metric-mini-value" style="color:var(--neg);">{{ maeMfe.recommended_sl != null ? maeMfe.recommended_sl.toFixed(2) + '%' : '—' }}</div>
                             </div>
                         </template>
 
                         <!-- Regime view: expectancy-optimised recommendations for THIS regime -->
                         <template v-else>
-                            <div class="metric-mini" style="border: 1px solid rgba(227,179,65,0.35); background:rgba(227,179,65,0.06);"
+                            <div class="metric-mini" style="border: 1px solid rgba(var(--neu-rgb),0.35); background:rgba(var(--neu-rgb),0.06);"
                                  title="Recommended MFE % for this regime: the favorable-excursion take-profit level, from its MFE distribution at the expectancy-maximising point">
-                                <div class="metric-mini-label" style="color:#e3b341;">Rec. MFE % (TP)</div>
-                                <div class="metric-mini-value" style="color:#e3b341;">{{ maeMfeStat.best_tp != null ? maeMfeStat.best_tp.toFixed(2) + '%' : '—' }}</div>
+                                <div class="metric-mini-label" style="color:var(--neu);">Rec. MFE % (TP)</div>
+                                <div class="metric-mini-value" style="color:var(--neu);">{{ maeMfeStat.best_tp != null ? maeMfeStat.best_tp.toFixed(2) + '%' : '—' }}</div>
                             </div>
-                            <div class="metric-mini" style="border: 1px solid rgba(244,135,155,0.35); background:rgba(244,135,155,0.06);"
+                            <div class="metric-mini" style="border: 1px solid rgba(var(--neg-rgb),0.35); background:rgba(var(--neg-rgb),0.06);"
                                  title="Recommended MAE % for this regime: the adverse-excursion stop level, from its MAE distribution at the expectancy-maximising point">
-                                <div class="metric-mini-label" style="color:#f4879b;">Rec. MAE % (SL)</div>
-                                <div class="metric-mini-value" style="color:#f4879b;">{{ maeMfeStat.best_sl != null ? maeMfeStat.best_sl.toFixed(2) + '%' : '—' }}</div>
+                                <div class="metric-mini-label" style="color:var(--neg);">Rec. MAE % (SL)</div>
+                                <div class="metric-mini-value" style="color:var(--neg);">{{ maeMfeStat.best_sl != null ? maeMfeStat.best_sl.toFixed(2) + '%' : '—' }}</div>
                             </div>
-                            <div class="metric-mini" style="border: 1px solid rgba(126,226,168,0.3); background:rgba(126,226,168,0.06);"
+                            <div class="metric-mini" style="border: 1px solid rgba(var(--pos-rgb),0.3); background:rgba(var(--pos-rgb),0.06);"
                                  title="Mean modelled per-trade outcome in R-multiples (1R = this regime's recommended MAE % stop)">
-                                <div class="metric-mini-label" :style="{ color: (maeMfeStat.best_exp_r || 0) >= 0 ? '#7ee2a8' : '#f4879b' }">Expectancy R / Trade</div>
-                                <div class="metric-mini-value" :style="{ color: (maeMfeStat.best_exp_r || 0) >= 0 ? '#7ee2a8' : '#f4879b' }">
+                                <div class="metric-mini-label" :style="{ color: (maeMfeStat.best_exp_r || 0) >= 0 ? 'var(--pos)' : 'var(--neg)' }">Expectancy R / Trade</div>
+                                <div class="metric-mini-value" :style="{ color: (maeMfeStat.best_exp_r || 0) >= 0 ? 'var(--pos)' : 'var(--neg)' }">
                                     {{ maeMfeStat.best_exp_r != null ? (maeMfeStat.best_exp_r >= 0 ? '+' : '') + maeMfeStat.best_exp_r.toFixed(2) + 'R' : '—' }}
                                 </div>
                             </div>
@@ -1342,21 +1357,21 @@
                         <div v-for="c in maeMfeViewClusters" :key="c.id"
                              :style="{ display:'flex', flexDirection:'column', gap:'0.15rem', padding:'0.45rem 0.7rem',
                                        borderRadius:'6px', fontSize:'0.75rem', lineHeight:'1.3',
-                                       background: c.is_dominant ? 'rgba(227,179,65,0.12)' : 'rgba(255,255,255,0.04)',
-                                       border: '1px solid ' + (c.is_dominant ? '#e3b341' : 'rgba(255,255,255,0.1)') }">
-                            <span :style="{ color: c.is_dominant ? '#e3b341' : '#cdc4ff', fontWeight:700 }">
+                                       background: c.is_dominant ? 'rgba(var(--neu-rgb),0.12)' : 'var(--tile-bg)',
+                                       border: '1px solid ' + (c.is_dominant ? 'var(--neu)' : 'var(--border-2)') }">
+                            <span :style="{ color: c.is_dominant ? 'var(--neu)' : 'var(--accent-txt)', fontWeight:700 }">
                                 Cluster {{ c.id }}{{ c.is_dominant ? ' ★' : '' }}
                             </span>
-                            <span style="color:#e8e5ef;">MFE <strong>{{ c.mfe.toFixed(2) }}%</strong> · MAE <strong>{{ c.mae.toFixed(2) }}%</strong></span>
-                            <span style="color:#9891a8;">n={{ c.size }} · WR {{ c.win_rate.toFixed(1) }}% · E={{ c.expectancy_r != null ? (c.expectancy_r >= 0 ? '+' : '') + c.expectancy_r.toFixed(2) + 'R' : '—' }}</span>
+                            <span style="color:var(--text);">MFE <strong>{{ c.mfe.toFixed(2) }}%</strong> · MAE <strong>{{ c.mae.toFixed(2) }}%</strong></span>
+                            <span style="color:var(--text-soft);">n={{ c.size }} · WR {{ c.win_rate.toFixed(1) }}% · E={{ c.expectancy_r != null ? (c.expectancy_r >= 0 ? '+' : '') + c.expectancy_r.toFixed(2) + 'R' : '—' }}</span>
                         </div>
                     </div>
 
                     <!-- MAE vs MFE scatter -->
                     <div style="margin-bottom:1.25rem;">
-                        <div style="font-size:0.78rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:0.4rem;">
+                        <div style="font-size:0.78rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:0.4rem;">
                             MAE vs MFE Scatter
-                            <span style="text-transform:none; color:#6f6880;"> <template v-if="maeMfeView === '__all__'">all trades; cluster centroids (stars), recommended <span style="color:#e3b341;">MFE %</span> &amp; <span style="color:#f4879b;">MAE %</span> (dashed lines)</template><template v-else><strong :style="{ color: (regimeColors[maeMfeView] || {}).text }">{{ maeMfeView.replace(/_/g, ' ') }}</strong> trades only; this regime's cluster centroids (stars), dashed lines = this regime's recommended <span style="color:#e3b341;">MFE %</span> &amp; <span style="color:#f4879b;">MAE %</span></template></span>
+                            <span style="text-transform:none; color:var(--text-faint);"> <template v-if="maeMfeView === '__all__'">all trades; cluster centroids (stars), recommended <span style="color:var(--neu);">MFE %</span> &amp; <span style="color:var(--neg);">MAE %</span> (dashed lines)</template><template v-else><strong :style="{ color: (regimeColors[maeMfeView] || {}).text }">{{ maeMfeView.replace(/_/g, ' ') }}</strong> trades only; this regime's cluster centroids (stars), dashed lines = this regime's recommended <span style="color:var(--neu);">MFE %</span> &amp; <span style="color:var(--neg);">MAE %</span></template></span>
                         </div>
                         <div id="maeMfeScatter" style="height:420px;"></div>
                     </div>
@@ -1366,14 +1381,14 @@
 
             <!-- === 3D ANALYSIS EXPLORER === -->
             <style>
-                #bt-3d-panel .axis3d-label { font-size:0.65rem; color:#6f6880; text-transform:uppercase; letter-spacing:0.05em; }
+                #bt-3d-panel .axis3d-label { font-size:0.65rem; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.05em; }
                 #bt-3d-panel select.sel3d { font-size:0.8rem; padding:5px 8px; }
             </style>
             <div class="card" id="bt-3d-panel" v-if="enrichedTrades.length > 0">
                 <h3>3D Analysis Explorer</h3>
                 <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:16px;">
                     <!-- Axes group -->
-                    <div style="display:flex; gap:8px; align-items:flex-end; padding:8px 10px; background:rgba(255,255,255,0.03); border-radius:6px; border:1px solid rgba(255,255,255,0.07);">
+                    <div style="display:flex; gap:8px; align-items:flex-end; padding:8px 10px; background:var(--tile-bg); border-radius:6px; border:1px solid var(--tile-brd);">
                         <div style="display:flex; flex-direction:column; gap:3px;">
                             <label class="axis3d-label">X Axis</label>
                             <select id="3d-x-axis" class="form-input sel3d" style="width:160px;" onchange="_render3DPlot()">
@@ -1460,7 +1475,7 @@
                         </div>
                     </div>
                     <!-- Display group -->
-                    <div style="display:flex; gap:8px; align-items:flex-end; padding:8px 10px; background:rgba(255,255,255,0.03); border-radius:6px; border:1px solid rgba(255,255,255,0.07);">
+                    <div style="display:flex; gap:8px; align-items:flex-end; padding:8px 10px; background:var(--tile-bg); border-radius:6px; border:1px solid var(--tile-brd);">
                         <div style="display:flex; flex-direction:column; gap:3px;">
                             <label class="axis3d-label">Color By</label>
                             <select id="3d-color-by" class="form-input sel3d" style="width:96px;" onchange="_render3DPlot()">
@@ -1502,10 +1517,10 @@
                     </div>
                 </div>
                 <div id="chart-3d" style="width:100%; min-height:624px;"></div>
-                <div style="margin-top:8px; font-size:0.7rem; color:#6f6880; line-height:1.5;">
-                    One point per closed trade. <strong style="color:#9891a8;">Trade axes</strong> (MAE, MFE, Trade ROI, Duration, Leverage) are per-trade values;
-                    <strong style="color:#9891a8;">cumulative / rolling axes</strong> (Cum ROI, Win Rate, Sharpe, Sortino, Profit Factor, SNR, Expectancy R, R:R, CAGR, Max DD) are computed incrementally in trade order.
-                    Rolling metrics use the <strong style="color:#9891a8;">Window</strong> look-back. MAE / MFE are leverage-adjusted, drawn from each trade's min/max price.
+                <div style="margin-top:8px; font-size:0.7rem; color:var(--text-faint); line-height:1.5;">
+                    One point per closed trade. <strong style="color:var(--text-soft);">Trade axes</strong> (MAE, MFE, Trade ROI, Duration, Leverage) are per-trade values;
+                    <strong style="color:var(--text-soft);">cumulative / rolling axes</strong> (Cum ROI, Win Rate, Sharpe, Sortino, Profit Factor, SNR, Expectancy R, R:R, CAGR, Max DD) are computed incrementally in trade order.
+                    Rolling metrics use the <strong style="color:var(--text-soft);">Window</strong> look-back. MAE / MFE are leverage-adjusted, drawn from each trade's min/max price.
                 </div>
             </div>
 
@@ -1515,6 +1530,20 @@
 
 <script>
 const { createApp } = Vue;
+
+// Regime palette for the active skin. Concrete colours rather than var(...):
+// the same values feed Plotly, which cannot resolve CSS variables. Rebuilt on
+// every theme change (see _restyleCharts).
+function buildRegimeColors() {
+    const tc = VulcanTheme.chart();
+    return {
+        'EXTREME_BULL': { solid: tc.pos,  text: tc.pos,  bg: VulcanTheme.rgba('--pos', 0.22) },
+        'BULL':         { solid: tc.pos,  text: tc.pos,  bg: VulcanTheme.rgba('--pos', 0.10) },
+        'RANGING':      { solid: tc.soft, text: tc.soft, bg: 'rgba(139,147,163,0.07)' },
+        'BEAR':         { solid: tc.neg,  text: tc.neg,  bg: VulcanTheme.rgba('--neg', 0.10) },
+        'EXTREME_BEAR': { solid: tc.neg,  text: tc.neg,  bg: VulcanTheme.rgba('--neg', 0.22) },
+    };
+}
 
 createApp({
     data() {
@@ -1605,13 +1634,7 @@ createApp({
             regimeError: null,
             regimePair: '__all__',
             regimeOrder: ['EXTREME_BULL', 'BULL', 'RANGING', 'BEAR', 'EXTREME_BEAR'],
-            regimeColors: {
-                'EXTREME_BULL': { solid: '#7ee2a8', text: '#7ee2a8', bg: 'rgba(126,226,168,0.22)' },
-                'BULL':         { solid: '#7ee2a8', text: '#7ee2a8', bg: 'rgba(126,226,168,0.10)' },
-                'RANGING':      { solid: '#9891a8', text: '#9891a8', bg: 'rgba(139,147,163,0.07)' },
-                'BEAR':         { solid: '#f4879b', text: '#f4879b', bg: 'rgba(244,135,155,0.10)' },
-                'EXTREME_BEAR': { solid: '#f4879b', text: '#f4879b', bg: 'rgba(244,135,155,0.22)' },
-            },
+            regimeColors: buildRegimeColors(),
             // --- Volatility Bias (ambient market vol at entry, backend-derived) ---
             volatilityBias: null,
             volBiasLoading: false,
@@ -1860,6 +1883,10 @@ createApp({
         fetch('/api/version').then(r => r.json()).then(d => {
             if (d.version) this.version = d.version;
         }).catch(() => {});
+        // Plotly / lightweight-charts take concrete colours, so a light<->dark
+        // switch has to redraw them. Registered before the awaits so a toggle
+        // during the initial load is not missed.
+        window.addEventListener('vulcan-theme', () => this._restyleCharts());
         await this.refreshList();
         await this.loadRunOptions();
         await this.refreshJobs();
@@ -1867,6 +1894,28 @@ createApp({
     },
     beforeUnmount() { this.stopJobsPolling(); this.stopPfPolling(); this.stopSuitePolling(); },
     methods: {
+        _restyleCharts() {
+            this.regimeColors = buildRegimeColors();
+            const run = (what, fn) => {
+                try { fn(); } catch (e) { console.warn('[VT] theme redraw failed (' + what + ')', e); }
+            };
+            run('equity/hourly', () => this.renderCharts());
+            run('regime', () => this.renderRegimeCharts());
+            run('mae/mfe', () => this.renderMaeMfeCharts());
+            run('3d', () => _render3DPlot());
+            // the pair chart rebuilds from scratch and fits all content, so carry
+            // the user's current zoom/pan across the rebuild
+            if (this.__lwChart && this.__lwLast) {
+                let range = null;
+                try { range = this.__lwChart.timeScale().getVisibleLogicalRange(); } catch (_) {}
+                run('pair chart', () => this._renderPairChart(this.__lwLast.candles, this.__lwLast.pair));
+                if (range) {
+                    this.$nextTick(() => {
+                        try { this.__lwChart.timeScale().setVisibleLogicalRange(range); } catch (_) {}
+                    });
+                }
+            }
+        },
         _resizePlot(id) {
             // a chart drawn while its tab was hidden lays out at zero width;
             // Plotly only picks up the real container size once it is visible
@@ -1952,8 +2001,8 @@ createApp({
             if (this.jobsPollTimer) { clearInterval(this.jobsPollTimer); this.jobsPollTimer = null; }
         },
         jobStatusColor(s) {
-            return ({ running: '#e3b341', queued: '#9891a8', succeeded: '#7ee2a8',
-                     failed: '#f4879b', cancelled: '#9891a8', error: '#f4879b' })[s] || '#e8e5ef';
+            return ({ running: 'var(--neu)', queued: 'var(--text-soft)', succeeded: 'var(--pos)',
+                     failed: 'var(--neg)', cancelled: 'var(--text-soft)', error: 'var(--neg)' })[s] || 'var(--text)';
         },
         async startRun() {
             this.runError = null;
@@ -2330,6 +2379,7 @@ createApp({
             }
         },
         _renderPairChart(candles, pair) {
+            this.__lwLast = { candles, pair };   // so a theme change can redraw it
             if (!candles || candles.length === 0) {
                 this.chartError = 'No candle data available for ' + pair;
                 return;
@@ -2343,26 +2393,27 @@ createApp({
                 // Use explicit dimensions, autoSize can return 0 during layout transitions
                 const w = el.clientWidth || el.offsetWidth || 900;
                 const h = 520;
+                const tc = VulcanTheme.chart();
 
                 try {
                     this.__lwChart = LightweightCharts.createChart(el, {
                         width: w,
                         height: h,
                         layout: {
-                            background: { type: 'solid', color: '#0d0f13' },
-                            textColor: '#9891a8',
+                            background: { type: 'solid', color: tc.bg },
+                            textColor: tc.text,
                         },
                         grid: {
-                            vertLines: { color: 'rgba(255,255,255,0.05)' },
-                            horzLines: { color: 'rgba(255,255,255,0.05)' },
+                            vertLines: { color: tc.grid },
+                            horzLines: { color: tc.grid },
                         },
                         timeScale: {
                             timeVisible: true,
                             secondsVisible: false,
-                            borderColor: 'rgba(255,255,255,0.1)',
+                            borderColor: tc.border,
                             rightOffset: 5,
                         },
-                        rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+                        rightPriceScale: { borderColor: tc.border },
                         crosshair: { mode: 1 },
                         // Scroll: wheel zooms time axis only; click+drag pans
                         handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
@@ -2385,12 +2436,12 @@ createApp({
                 this.__lwResizeObs.observe(el);
 
                 this.__lwCandles = this.__lwChart.addCandlestickSeries({
-                    upColor: '#7ee2a8',
-                    downColor: '#f4879b',
-                    borderUpColor: '#7ee2a8',
-                    borderDownColor: '#f4879b',
-                    wickUpColor: '#7ee2a8',
-                    wickDownColor: '#f4879b',
+                    upColor: tc.pos,
+                    downColor: tc.neg,
+                    borderUpColor: tc.pos,
+                    borderDownColor: tc.neg,
+                    wickUpColor: tc.pos,
+                    wickDownColor: tc.neg,
                 });
 
                 this.__lwVolume = this.__lwChart.addHistogramSeries({
@@ -2412,7 +2463,7 @@ createApp({
                 const vol = candles.map(c => ({
                     time: c.time,
                     value: +(c.volume || 0),
-                    color: c.close >= c.open ? 'rgba(126,226,168,0.3)' : 'rgba(244,135,155,0.3)',
+                    color: c.close >= c.open ? VulcanTheme.rgba('--pos', 0.3) : VulcanTheme.rgba('--neg', 0.3),
                 }));
 
                 try {
@@ -2444,7 +2495,7 @@ createApp({
                     if (!isNaN(ets)) markers.push({
                         time: ets,
                         position: t.is_short ? 'aboveBar' : 'belowBar',
-                        color: t.is_short ? '#f4879b' : '#7ee2a8',
+                        color: t.is_short ? tc.neg : tc.pos,
                         shape: t.is_short ? 'arrowDown' : 'arrowUp',
                         text: t.enter_tag || (t.is_short ? 'S' : 'L'),
                         size: 1,
@@ -2453,7 +2504,7 @@ createApp({
                     if (!isNaN(xts)) markers.push({
                         time: xts,
                         position: t.is_short ? 'belowBar' : 'aboveBar',
-                        color: t.__pnl >= 0 ? '#7ee2a8' : '#f4879b',
+                        color: t.__pnl >= 0 ? tc.pos : tc.neg,
                         shape: 'circle',
                         text: (t.__pnlPct * 100 >= 0 ? '+' : '') + (t.__pnlPct * 100).toFixed(1) + '%',
                         size: 0.8,
@@ -2614,7 +2665,7 @@ createApp({
                 const x = [], y = [];
                 pts.forEach(p => { cum += (p.pnl || 0); x.push(new Date(p.date)); y.push(parseFloat(cum.toFixed(4))); });
                 return { x, y, type: 'scatter', mode: 'lines', name: r.replace(/_/g, ' '),
-                    line: { color: (rc[r] || {}).solid || '#9891a8', width: this.selectedRegime ? 2 : 1.5 }, connectgaps: false };
+                    line: { color: (rc[r] || {}).solid || VulcanTheme.css('--text-soft'), width: this.selectedRegime ? 2 : 1.5 }, connectgaps: false };
             });
 
             const ddTraces = activeRegimes.map(r => {
@@ -2628,12 +2679,12 @@ createApp({
                     y.push(parseFloat((peak !== 0 ? ((cum - peak) / peak) * 100 : 0).toFixed(4)));
                 });
                 return { x, y, type: 'scatter', mode: 'lines', name: r.replace(/_/g, ' '),
-                    line: { color: (rc[r] || {}).solid || '#9891a8', width: this.selectedRegime ? 2 : 1.5 }, connectgaps: false };
+                    line: { color: (rc[r] || {}).solid || VulcanTheme.css('--text-soft'), width: this.selectedRegime ? 2 : 1.5 }, connectgaps: false };
             });
 
             if (document.getElementById('regimeEquityChart')) {
                 Plotly.react('regimeEquityChart', eqTraces, this._layout({
-                    yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'Cumulative P&L' },
+                    yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'Cumulative P&L' },
                     showlegend: false,
                     shapes,
                 }), cfg);
@@ -2641,7 +2692,7 @@ createApp({
 
             if (document.getElementById('regimeDdChart')) {
                 Plotly.react('regimeDdChart', ddTraces, this._layout({
-                    yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'Drawdown %' },
+                    yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'Drawdown %' },
                     showlegend: false,
                     shapes,
                 }), cfg);
@@ -2667,17 +2718,17 @@ createApp({
                     text: pfText,
                     textposition: 'outside',
                     marker: {
-                        color: ro.map(r => (this.regimeColors[r] || {}).solid || '#9891a8'),
+                        color: ro.map(r => (this.regimeColors[r] || {}).solid || VulcanTheme.css('--text-soft')),
                         opacity: 0.85,
                     },
                     name: 'Profit Factor',
                 }], this._layout({
-                    xaxis: { gridcolor: 'rgba(255,255,255,0.05)', fixedrange: true },
-                    yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'Profit Factor', fixedrange: true },
+                    xaxis: { gridcolor: VulcanTheme.css('--chart-grid'), fixedrange: true },
+                    yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'Profit Factor', fixedrange: true },
                     dragmode: false,
                     shapes: [{
                         type: 'line', x0: -0.5, x1: ro.length - 0.5, y0: 1, y1: 1,
-                        line: { color: 'rgba(255,255,255,0.3)', dash: 'dash', width: 1 },
+                        line: { color: VulcanTheme.css('--chart-guide'), dash: 'dash', width: 1 },
                     }],
                 }), { responsive: true, displaylogo: false, displayModeBar: false, scrollZoom: false });
             }
@@ -2730,14 +2781,14 @@ createApp({
                         mode: 'markers', type: 'scatter', name: 'Loss',
                         text: losses.map(hov),
                         hoverinfo: 'text',
-                        marker: { color: 'rgba(244,135,155,0.45)', size: 5, symbol: 'circle' },
+                        marker: { color: VulcanTheme.rgba('--neg', 0.45), size: 5, symbol: 'circle' },
                     },
                     {
                         x: wins.map(r => r.mae), y: wins.map(r => r.mfe),
                         mode: 'markers', type: 'scatter', name: 'Win',
                         text: wins.map(hov),
                         hoverinfo: 'text',
-                        marker: { color: 'rgba(126,226,168,0.55)', size: 5, symbol: 'circle' },
+                        marker: { color: VulcanTheme.rgba('--pos', 0.55), size: 5, symbol: 'circle' },
                     },
                 ];
 
@@ -2762,8 +2813,8 @@ createApp({
                         marker: {
                             size: viewClusters.map(c => c.is_dominant ? 18 : 13),
                             symbol: 'star',
-                            color: viewClusters.map(c => c.is_dominant ? '#e3b341' : '#cdc4ff'),
-                            line: { width: 2, color: '#fff' },
+                            color: viewClusters.map(c => c.is_dominant ? VulcanTheme.css('--neu') : VulcanTheme.css('--accent-txt')),
+                            line: { width: 2, color: VulcanTheme.css('--chart-star-edge') },
                         },
                     });
                 }
@@ -2773,7 +2824,7 @@ createApp({
                 traces.push({
                     x: [0, maxVal], y: [0, maxVal],
                     mode: 'lines', type: 'scatter', name: 'MAE = MFE',
-                    line: { color: 'rgba(255,255,255,0.18)', dash: 'dash', width: 1 },
+                    line: { color: VulcanTheme.css('--chart-guide-soft'), dash: 'dash', width: 1 },
                     hoverinfo: 'none',
                 });
 
@@ -2782,7 +2833,7 @@ createApp({
                     traces.push({
                         x: [0, maxVal], y: [recTp, recTp],
                         mode: 'lines', type: 'scatter', name: `${tpLabel} ${recTp.toFixed(2)}%`,
-                        line: { color: '#e3b341', dash: 'dot', width: 1.5 },
+                        line: { color: VulcanTheme.css('--neu'), dash: 'dot', width: 1.5 },
                         hoverinfo: 'none',
                     });
                 }
@@ -2790,16 +2841,16 @@ createApp({
                     traces.push({
                         x: [recSl, recSl], y: [0, maxVal],
                         mode: 'lines', type: 'scatter', name: `${slLabel} ${recSl.toFixed(2)}%`,
-                        line: { color: '#f4879b', dash: 'dot', width: 1.5 },
+                        line: { color: VulcanTheme.css('--neg'), dash: 'dot', width: 1.5 },
                         hoverinfo: 'none',
                     });
                 }
 
                 Plotly.react('maeMfeScatter', traces, this._layout({
-                    xaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'MAE % (adverse)', fixedrange: false },
-                    yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'MFE % (favorable)', fixedrange: false },
+                    xaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'MAE % (adverse)', fixedrange: false },
+                    yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'MFE % (favorable)', fixedrange: false },
                     showlegend: true,
-                    legend: { x: 0.01, y: 0.99, bgcolor: 'rgba(0,0,0,0.5)', font: { size: 10 } },
+                    legend: { x: 0.01, y: 0.99, bgcolor: VulcanTheme.css('--chart-legend-bg'), font: { size: 10 } },
                     margin: { t: 20, r: 20, b: 50, l: 60 },
                 }), cfg);
             }
@@ -2811,10 +2862,10 @@ createApp({
             return Object.assign({
                 paper_bgcolor: 'rgba(0,0,0,0)',
                 plot_bgcolor: 'rgba(0,0,0,0)',
-                font: { color: '#e8e5ef', family: 'system-ui, sans-serif' },
+                font: { color: VulcanTheme.css('--text'), family: 'system-ui, sans-serif' },
                 margin: { t: 30, r: 30, b: 50, l: 60 },
-                xaxis: { gridcolor: 'rgba(255,255,255,0.05)', fixedrange: false },
-                yaxis: { gridcolor: 'rgba(255,255,255,0.05)', fixedrange: true },
+                xaxis: { gridcolor: VulcanTheme.css('--chart-grid'), fixedrange: false },
+                yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), fixedrange: true },
                 showlegend: false,
                 dragmode: 'pan',
             }, extra || {});
@@ -2835,9 +2886,9 @@ createApp({
             // Equity
             Plotly.react('equityChart', [{
                 x: eq.dates, y: eq.values, type: 'scatter', mode: 'lines',
-                line: { color: '#7ee2a8', width: 2 },
-                fill: 'tozeroy', fillcolor: 'rgba(126,226,168,0.1)',
-            }], this._layout({ yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'Equity' } }), cfg);
+                line: { color: VulcanTheme.css('--pos'), width: 2 },
+                fill: 'tozeroy', fillcolor: VulcanTheme.rgba('--pos', 0.1),
+            }], this._layout({ yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'Equity' } }), cfg);
 
             // Drawdown
             let peak = eq.values[0] || 0; const ddVals = eq.values.map(v => {
@@ -2846,9 +2897,9 @@ createApp({
             });
             Plotly.react('drawdownChart', [{
                 x: eq.dates, y: ddVals, type: 'scatter', mode: 'lines',
-                line: { color: '#f4879b', width: 2 },
-                fill: 'tozeroy', fillcolor: 'rgba(244,135,155,0.15)',
-            }], this._layout({ yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'Drawdown %' } }), cfg);
+                line: { color: VulcanTheme.css('--neg'), width: 2 },
+                fill: 'tozeroy', fillcolor: VulcanTheme.rgba('--neg', 0.15),
+            }], this._layout({ yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'Drawdown %' } }), cfg);
 
             // Hourly P&L — bucketed by UTC or local hour-of-day (see hourlyTz toggle)
             const useLocalHours = this.hourlyTz === 'local';
@@ -2868,28 +2919,28 @@ createApp({
             const hours = Array.from({ length: 24 }, (_, i) => i + ':00');
 
             const barCfg = { responsive: true, displaylogo: false, displayModeBar: false };
-            const barLayout = (extra) => this._layout(Object.assign({ xaxis: { gridcolor: 'rgba(255,255,255,0.05)', fixedrange: true } }, extra));
+            const barLayout = (extra) => this._layout(Object.assign({ xaxis: { gridcolor: VulcanTheme.css('--chart-grid'), fixedrange: true } }, extra));
 
             Plotly.react('hourlyPnlChart', [{
                 x: hours, y: hourly.map(h => h.pnl), type: 'bar',
-                marker: { color: hourly.map(h => h.pnl >= 0 ? '#7ee2a8' : '#f4879b') },
-            }], barLayout({ yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'PnL' } }), barCfg);
+                marker: { color: hourly.map(h => h.pnl >= 0 ? VulcanTheme.css('--pos') : VulcanTheme.css('--neg')) },
+            }], barLayout({ yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'PnL' } }), barCfg);
 
             Plotly.react('hourlyPfChart', [{
                 x: hours,
                 y: hourly.map(h => h.gl > 0 ? h.gw / h.gl : (h.gw > 0 ? 5 : 0)),
                 type: 'bar',
-                marker: { color: hourly.map(h => (h.gl > 0 ? h.gw / h.gl : 5) >= 1 ? '#7ee2a8' : '#f4879b') },
+                marker: { color: hourly.map(h => (h.gl > 0 ? h.gw / h.gl : 5) >= 1 ? VulcanTheme.css('--pos') : VulcanTheme.css('--neg')) },
             }], barLayout({
-                yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'Profit Factor' },
+                yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'Profit Factor' },
                 shapes: [{ type: 'line', x0: -0.5, x1: 23.5, y0: 1, y1: 1,
-                           line: { color: 'rgba(255,255,255,0.3)', dash: 'dash', width: 1 } }],
+                           line: { color: VulcanTheme.css('--chart-guide'), dash: 'dash', width: 1 } }],
             }), barCfg);
 
             Plotly.react('hourlyDdChart', [{
                 x: hours, y: hourly.map(h => -h.dd), type: 'bar',
-                marker: { color: '#f4879b' },
-            }], barLayout({ yaxis: { gridcolor: 'rgba(255,255,255,0.05)', title: 'Max DD' } }), barCfg);
+                marker: { color: VulcanTheme.css('--neg') },
+            }], barLayout({ yaxis: { gridcolor: VulcanTheme.css('--chart-grid'), title: 'Max DD' } }), barCfg);
         },
         // ----- 3D Analysis Explorer -----
         render3DAnalysis() {
@@ -3193,7 +3244,7 @@ function _render3DPlot() {
 
     const chartEl = document.getElementById('chart-3d');
     if (!points || points.length === 0) {
-        if (chartEl) chartEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:400px;color:#6f6880;font-size:0.9rem;">No data for selected axes</div>';
+        if (chartEl) chartEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:400px;color:var(--text-faint);font-size:0.9rem;">No data for selected axes</div>';
         return;
     }
 
@@ -3213,11 +3264,12 @@ function _render3DPlot() {
              + `Duration: ${p.duration}m  Lev: ${p.leverage}x  Trade #${p.trade_idx}`;
     });
 
+    const tc = VulcanTheme.chart();
     const axStyle = {
-        gridcolor:     'rgba(255,255,255,0.08)',
-        zerolinecolor: 'rgba(255,255,255,0.2)',
-        tickfont:      { color: '#9891a8', size: 10 },
-        titlefont:     { color: '#cdc4ff', size: 11 },
+        gridcolor:     tc.grid3d,
+        zerolinecolor: tc.zero,
+        tickfont:      { color: tc.text, size: 10 },
+        titlefont:     { color: tc.title, size: 11 },
     };
 
     let traces = [];
@@ -3246,7 +3298,7 @@ function _render3DPlot() {
             const _axLbl = bx.bins.length < 2 ? xDef.label : yDef.label;
             const _warn = document.createElement('div');
             _warn.id = '3d-surface-warn';
-            _warn.style.cssText = 'font-size:0.72rem;color:#e3b341;margin-top:4px;';
+            _warn.style.cssText = 'font-size:0.72rem;color:var(--neu);margin-top:4px;';
             _warn.textContent = `"${_axLbl}" has only 1 unique value - showing scatter. Try different axes.`;
             const _chartDiv = document.getElementById('chart-3d');
             if (_chartDiv && _chartDiv.nextSibling) _chartDiv.parentNode.insertBefore(_warn, _chartDiv.nextSibling);
@@ -3264,9 +3316,9 @@ function _render3DPlot() {
                     opacity:    0.85,
                     showscale:  true,
                     colorbar: {
-                        title:    { text: colorDef.label, font: { color: '#9891a8', size: 11 } },
+                        title:    { text: colorDef.label, font: { color: tc.text, size: 11 } },
                         thickness: 14,
-                        tickfont:  { color: '#9891a8', size: 9 },
+                        tickfont:  { color: tc.text, size: 9 },
                         len:       0.8,
                         x:         1.02,
                         xanchor:   'left',
@@ -3319,9 +3371,9 @@ function _render3DPlot() {
             x: bx.bins, y: by.bins, z: zGrid,
             colorscale,
             colorbar: {
-                title:    { text: zDef.label, font: { color: '#9891a8', size: 11 } },
+                title:    { text: zDef.label, font: { color: tc.text, size: 11 } },
                 thickness: 14,
-                tickfont:  { color: '#9891a8', size: 9 },
+                tickfont:  { color: tc.text, size: 9 },
                 len:       0.8,
                 x:         1.02,
                 xanchor:   'left',
@@ -3347,9 +3399,9 @@ function _render3DPlot() {
                 opacity:    0.75,
                 showscale:  true,
                 colorbar: {
-                    title:    { text: colorDef.label, font: { color: '#9891a8', size: 11 } },
+                    title:    { text: colorDef.label, font: { color: tc.text, size: 11 } },
                     thickness: 14,
-                    tickfont:  { color: '#9891a8', size: 9 },
+                    tickfont:  { color: tc.text, size: 9 },
                     len:       0.8,
                     x:         1.02,
                     xanchor:   'left',
@@ -3375,7 +3427,7 @@ function _render3DPlot() {
     const layout = {
         paper_bgcolor: 'transparent',
         plot_bgcolor:  'transparent',
-        font:   { color: '#9891a8', size: 11 },
+        font:   { color: tc.text, size: 11 },
         margin: { t: 20, r: 140, b: 20, l: 20 },
         scene: {
             xaxis:   { ...axStyle, title: xDef.label },

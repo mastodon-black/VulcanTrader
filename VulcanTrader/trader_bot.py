@@ -3257,9 +3257,22 @@ class VulcanTraderBot(LoggingMixin):
 
         profit_rate: float = trade.safe_close_rate
         profit = trade.calculate_profit(rate=profit_rate)
-        current_rate = self.exchange.get_rate(
-            trade.pair, side="exit", is_short=trade.is_short, refresh=False
-        )
+        try:
+            current_rate = self.exchange.get_rate(
+                trade.pair, side="exit", is_short=trade.is_short, refresh=False
+            )
+        except (ExchangeError, PricingError) as e:
+            # This cancel already happened (cancel_order_with_result + update_trade_state
+            # ran before we got here) - current_rate is only used below for the
+            # notification's display field, so a rate-limit/pricing hiccup here must not
+            # make a successful cancellation look like a failed one to manage_open_orders'
+            # caller, which logs any exception from this whole call chain as "Unexpected
+            # error managing open order ... skipping".
+            logger.warning(
+                f"Could not fetch current rate for {trade.pair} exit-cancel notification "
+                f"({e.__class__.__name__}) - using last known close rate instead."
+            )
+            current_rate = profit_rate
         gain = "profit" if profit.profit_ratio > 0 else "loss"
 
         msg: dict = {

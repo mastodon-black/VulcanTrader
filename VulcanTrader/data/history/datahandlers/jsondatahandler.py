@@ -39,12 +39,21 @@ class JsonDataHandler(IDataHandler):
         _data["date"] = _data["date"].astype(np.int64) // 1000 // 1000
 
         # Reset index, select only appropriate columns and save as json
-        _data.reset_index(drop=True).loc[:, self._columns].to_json(
-            filename, orient="values", compression="gzip" if self._use_zip else None
+        frame = _data.reset_index(drop=True).loc[:, self._columns]
+        self._write_atomically(
+            filename,
+            lambda tmp: frame.to_json(
+                tmp, orient="values", compression="gzip" if self._use_zip else None
+            ),
         )
 
     def _ohlcv_load(
-        self, pair: str, timeframe: str, timerange: TimeRange | None, candle_type: CandleType
+        self,
+        pair: str,
+        timeframe: str,
+        timerange: TimeRange | None,
+        candle_type: CandleType,
+        raise_on_error: bool = False,
     ) -> DataFrame:
         """
         Internal method used to load data for one pair from disk.
@@ -70,6 +79,8 @@ class JsonDataHandler(IDataHandler):
             pairdata = read_json(filename, orient="values")
             pairdata.columns = self._columns
         except ValueError:
+            if raise_on_error:
+                raise
             logger.error(f"Could not load data for {pair}.")
             return DataFrame(columns=self._columns)
         pairdata = pairdata.astype(

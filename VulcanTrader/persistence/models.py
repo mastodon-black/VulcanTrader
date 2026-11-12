@@ -125,6 +125,7 @@ def _acquire_writer_lock(ctx: PersistenceContext, path: Path) -> None:
     release_writer_lock(), called from bot.py's run_bot_lifecycle after
     cleanup. Re-initialising the same path from the same context (tests,
     restarts of the bot loop) reuses the already-held lock - see init_db()."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".lock")
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:

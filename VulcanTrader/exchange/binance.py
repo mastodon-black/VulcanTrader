@@ -13,6 +13,7 @@ from VulcanTrader.util.exceptions import DDosProtection, OperationalException, T
 from VulcanTrader.exchange import Exchange
 from VulcanTrader.exchange.binance_public_data import (
     concat_safe,
+    download_archive_funding_rate,
     download_archive_ohlcv,
     download_archive_trades,
 )
@@ -163,9 +164,22 @@ class Binance(Exchange):
         """
         if is_new_pair and candle_type in (CandleType.SPOT, CandleType.FUTURES, CandleType.MARK):
             with self._loop_lock:
-                x = self.loop.run_until_complete(
-                    self._async_get_candle_history(pair, timeframe, candle_type, 0)
-                )
+                try:
+                    x = self.loop.run_until_complete(
+                        self._async_get_candle_history(pair, timeframe, candle_type, 0)
+                    )
+                except Exception as e:
+                    # This probe always hits the live REST API directly (there's no
+                    # data.binance.vision archive equivalent for "detect listing date").
+                    # When the REST API is unreachable (e.g. geo-blocked), don't let that
+                    # sink the whole download - fall through and let the normal dispatch
+                    # below (which may still succeed via the archive) use since_ms as-is.
+                    logger.warning(
+                        f"Could not detect listing date for {pair} via "
+                        f"{e.__class__.__name__}: {e}. Falling back to the requested "
+                        "start date."
+                    )
+                    x = None
             if x and x[3] and x[3][0] and x[3][0][0] > since_ms:
                 # Set starting date to first available candle.
                 since_ms = x[3][0][0]
@@ -179,6 +193,14 @@ class Binance(Exchange):
                         f"{dt_from_ts(until_ms).isoformat()}"
                     )
                     return DataFrame(columns=DEFAULT_DATAFRAME_COLUMNS)
+
+        if candle_type == CandleType.FUNDING_RATE and not self._config["exchange"].get(
+            "only_from_ccxt", False
+        ):
+            # Binance only archives funding rate on data.binance.vision, not the REST
+            # API's ohlcv-shaped timeframe whitelist, so this candle type always tries
+            # the archive regardless of the requested timeframe.
+            return self.get_funding_rate_fast(pair=pair, timeframe=timeframe, since_ms=since_ms, until_ms=until_ms)
 
         if (
             self._config["exchange"].get("only_from_ccxt", False)
@@ -246,16 +268,72 @@ class Binance(Exchange):
         if until_ms and rest_since_ms > until_ms:
             rest_df = DataFrame()
         else:
-            rest_df = super().get_historic_ohlcv(
-                pair=pair,
-                timeframe=timeframe,
-                since_ms=rest_since_ms,
-                candle_type=candle_type,
-                is_new_pair=is_new_pair,
-                until_ms=until_ms,
-            )
+            try:
+                rest_df = super().get_historic_ohlcv(
+                    pair=pair,
+                    timeframe=timeframe,
+                    since_ms=rest_since_ms,
+                    candle_type=candle_type,
+                    is_new_pair=is_new_pair,
+                    until_ms=until_ms,
+                )
+            except Exception as e:
+                # Don't let a REST API outage (e.g. geo-blocking) discard the data we
+                # already pulled from the archive above - return that instead of raising.
+                logger.warning(
+                    f"Could not fetch the remaining {pair} {timeframe} {candle_type} "
+                    f"history via REST ({e.__class__.__name__}: {e}); returning "
+                    "archive-only data."
+                )
+                rest_df = DataFrame()
         all_df = concat_safe([df, rest_df])
         return all_df
+
+    def get_funding_rate_fast(
+        self,
+        pair: str,
+        timeframe: str,
+        since_ms: int,
+        until_ms: int | None = None,
+    ) -> DataFrame:
+        """
+        Fetch funding-rate history by leveraging https://data.binance.vision's monthly
+        `fundingRate` archive, falling back to the REST API only for the trailing gap it
+        doesn't cover yet (the current, still-open month).
+        """
+        with self._loop_lock:
+            df = self.loop.run_until_complete(
+                download_archive_funding_rate(
+                    pair=pair,
+                    since_ms=since_ms,
+                    until_ms=until_ms,
+                    markets=self.markets,
+                )
+            )
+
+        if df.empty:
+            rest_since_ms = since_ms
+        else:
+            rest_since_ms = dt_ts(df.iloc[-1].date) + 1
+
+        if until_ms and rest_since_ms > until_ms:
+            rest_df = DataFrame()
+        else:
+            try:
+                rest_df = super().get_historic_ohlcv(
+                    pair=pair,
+                    timeframe=timeframe,
+                    since_ms=rest_since_ms,
+                    candle_type=CandleType.FUNDING_RATE,
+                    until_ms=until_ms,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not fetch the remaining {pair} funding-rate history via REST "
+                    f"({e.__class__.__name__}: {e}); returning archive-only data."
+                )
+                rest_df = DataFrame()
+        return concat_safe([df, rest_df])
 
     def funding_fee_cutoff(self, open_date: datetime):
         """

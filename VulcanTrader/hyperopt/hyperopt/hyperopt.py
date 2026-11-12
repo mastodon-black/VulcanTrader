@@ -6,6 +6,7 @@ This module contains the hyperopt logic
 
 import gc
 import logging
+import os
 import random
 import sys
 from datetime import datetime
@@ -55,10 +56,14 @@ class Hyperopt:
         self.results_file: Path = (
             self.config["user_data_dir"]
             / "hyperopt_results"
-            / f"strategy_{strategy}_{time_now}.fthypt"
+            / f"strategy_{strategy}_{time_now}_{os.getpid()}.fthypt"
         )
+        # One file per run: a shared name let concurrent hyperopts overwrite and delete each
+        # other's candle data (corrupt pickles, KeyErrors, runs on another strategy's pairs).
         self.data_pickle_file = (
-            self.config["user_data_dir"] / "hyperopt_results" / "hyperopt_tickerdata.pkl"
+            self.config["user_data_dir"]
+            / "hyperopt_results"
+            / f"hyperopt_tickerdata_{strategy}_{time_now}_{os.getpid()}.pkl"
         )
         self.total_epochs = config.get("epochs", 0)
 
@@ -330,3 +335,9 @@ class Hyperopt:
             # This is printed when Ctrl+C is pressed quickly, before first epochs have
             # a chance to be evaluated.
             print("No epochs evaluated yet, no best result.")
+
+        # The candle-data pickle is per run now (see __init__), so remove it once done.
+        try:
+            Path(self.data_pickle_file).unlink(missing_ok=True)
+        except OSError:
+            pass

@@ -27,8 +27,15 @@ def expand_pairlist(
             except re.error as err:
                 raise ValueError(f"Wildcard error in {pair_wc}, {err}")
 
-        # Remove wildcard pairs that didn't have a match.
-        result = [element for element in result if re.fullmatch(r"^[A-Za-z0-9:/-]+$", element)]
+        # Remove wildcard pairs that didn't have a match. "." is allowed
+        # alongside the ccxt-style pair characters - real broker symbols use
+        # it routinely (MT5 account-suffix conventions like "EURUSD.i",
+        # ccxt dated/leveraged tickers like "BTC-26DEC25" aside, plain dotted
+        # suffixes are common) - rejecting it would silently drop otherwise
+        # valid, exactly-matched pairs here instead of catching genuine
+        # leftover-regex artifacts (unmatched "*", "(", "$", etc), which is
+        # this filter's actual purpose per the comment above.
+        result = [element for element in result if re.fullmatch(r"^[A-Za-z0-9:/.-]+$", element)]
 
     else:
         for pair_wc in wildcardpl:

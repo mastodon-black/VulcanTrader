@@ -48,31 +48,6 @@ Module contents
                                 liquidity tiers, and trade-state tracking
 
 Strategy-agnostic: usable by both Momentum and Mean Reversion strategies.
-
-Usage
------
-::
-
-    from regime_ecs_mixin import (
-        # Labels
-        RegimeLabels, TrendLabels, ADXDistributionLabels,
-        SlopeDistributionLabels, DISpreadLabels, HTFAlignmentLabels,
-        PerformanceRegime, VanTharpeLabels,
-        # Classifiers
-        RegimeClassifier, TrendClassifier, DistributionRegimeClassifier,
-        # ECS / MAE-MFE / Exits
-        EquityCurveSizing, MAEMFECalculator, RegimeExitCalculator,
-        # Filters
-        LiquidityTierManager, PairFilter,
-        # Risk
-        HawkesRiskEngine,
-        # Indicators
-        IndicatorHelpers,
-        # Van Tharp / Sizing
-        RMultipleTracker, ExpectancyCalculator,
-        AsymmetricLeverageClassifier,
-        PositionSizer, AsymmetricExpansionSizer, BlendedPositionSizer,
-    )
 """
 
 import bisect
@@ -1796,6 +1771,15 @@ class BacktestRegimeAnalyzer:
     VOL_BIAS_MIN_TRADES: int = 20
     VOL_BIAS_MIN_PER_BUCKET: int = 10
 
+    # The five trend buckets folded to the three sides the regime bias
+    # (analyze_regime_bias) reports on. Same thresholds as the volatility bias.
+    REGIME_SIDES: List[str] = ["BEAR", "RANGING", "BULL"]
+    _SIDE_OF: Dict[str, str] = {
+        "EXTREME_BULL": "BULL", "BULL": "BULL",
+        "RANGING": "RANGING",
+        "BEAR": "BEAR", "EXTREME_BEAR": "BEAR",
+    }
+
     # Colors used by the frontend for chart backgrounds / labels
     REGIME_COLORS: Dict[str, Dict[str, str]] = {
         "EXTREME_BULL": {"solid": "#10b981", "text": "#10b981", "bg": "rgba(16,185,129,0.25)"},
@@ -1964,6 +1948,24 @@ class BacktestRegimeAnalyzer:
         df.loc[baseline.isna() | df["atr_pct"].isna(), "vol_bucket"] = None
         return df
 
+    @classmethod
+    def classify_market(cls, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        ``date`` (naive UTC), ``regime`` and ``vol_bucket`` per candle of an
+        OHLCV frame: what :meth:`entry_labels` needs for the volatility and
+        regime bias, without the indicator columns. The labels are
+        categorical, so a frame stays small enough to cache (a year of 1m
+        candles is ~5 MB).
+        """
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"])
+        if hasattr(df["date"].dtype, "tz") and df["date"].dtype.tz is not None:
+            df["date"] = df["date"].dt.tz_localize(None)
+        out = cls.classify_volatility(cls.classify_regime(df))
+        return out[["date", "regime", "vol_bucket"]].astype(
+            {"regime": "category", "vol_bucket": "category"}
+        )
+
     # ------------------------------------------------------------------ entry alignment
 
     @staticmethod
@@ -2047,6 +2049,55 @@ class BacktestRegimeAnalyzer:
             idx = len(labels) - 1
         val = labels[idx]
         return default if val is None or (isinstance(val, float) and np.isnan(val)) else val
+
+    @classmethod
+    def entry_labels(
+        cls,
+        trades: list,
+        frames: "Dict[str, pd.DataFrame]",
+        columns: "List[str]",
+        timeframe: "str | None" = None,
+        reference: "pd.DataFrame | None" = None,
+    ) -> "Dict[str, list]":
+        """
+        Per-trade entry label for each of ``columns`` (see :meth:`label_at_entry`).
+
+        Each trade is looked up in its own pair's frame (``frames``, keyed by
+        the trade's ``pair``), or every trade in ``reference`` when one is
+        given. A frame needs a ``date`` column plus ``columns``, i.e. the
+        output of classify_regime and/or classify_volatility.
+
+        A trade with no frame for its pair, no parseable ``open_date`` or no
+        candle closed before it gets None, never a default bucket: a missing
+        label must not be counted as RANGING / LOW_VOL.
+        """
+        prepared: Dict[object, tuple] = {}
+
+        def _prep(df: pd.DataFrame) -> tuple:
+            raw = pd.to_datetime(df["date"])
+            if hasattr(raw.dtype, "tz") and raw.dtype.tz is not None:
+                raw = raw.dt.tz_localize(None)
+            dates = raw.to_list()
+            return dates, {c: df[c].to_list() for c in columns}, cls.resolve_interval(timeframe, dates)
+
+        out: Dict[str, list] = {c: [] for c in columns}
+        for t in trades:
+            key = None if reference is not None else t.get("pair")
+            if key not in prepared:
+                df = reference if reference is not None else frames.get(key)
+                prepared[key] = _prep(df) if df is not None and len(df) else None
+            entry = prepared[key]
+            dt = None
+            if entry is not None:
+                try:
+                    dt = datetime.fromisoformat(str(t.get("open_date") or "")[:19].replace(" ", "T"))
+                except ValueError:
+                    dt = None
+            for c in columns:
+                out[c].append(
+                    None if dt is None else cls.label_at_entry(entry[0], entry[1][c], dt, entry[2])
+                )
+        return out
 
     # ------------------------------------------------------------------ regime_periods
 
@@ -2538,30 +2589,8 @@ class BacktestRegimeAnalyzer:
         Returns (p_value, observed_difference_pct), or (None, None) when either
         bucket is empty.
         """
-        def _ratios(trades: list) -> "np.ndarray":
-            out = []
-            for t in trades:
-                v = t.get("profit_ratio")
-                if v is None:
-                    v = t.get("close_profit")
-                if v is None:
-                    try:
-                        stake = float(t.get("stake_amount") or 0.0)
-                    except (TypeError, ValueError):
-                        stake = 0.0
-                    pnl = t.get("profit_abs") or t.get("close_profit_abs") or 0.0
-                    try:
-                        v = float(pnl) / stake if stake > 0 else 0.0
-                    except (TypeError, ValueError):
-                        v = 0.0
-                try:
-                    out.append(float(v))
-                except (TypeError, ValueError):
-                    out.append(0.0)
-            return np.asarray(out, dtype=float)
-
-        hi = _ratios(high_trades)
-        lo = _ratios(low_trades)
+        hi = cls._trade_returns(high_trades)
+        lo = cls._trade_returns(low_trades)
         if hi.size == 0 or lo.size == 0:
             return None, None
 
@@ -2584,3 +2613,187 @@ class BacktestRegimeAnalyzer:
         # of resamples, which would overstate the evidence.
         p_value = (count + 1) / (b + 1)
         return p_value, observed
+
+    @staticmethod
+    def _trade_returns(trades: list) -> "np.ndarray":
+        """Per-trade return as a fraction of stake (profit_ratio, else pnl / stake)."""
+        out = []
+        for t in trades:
+            v = t.get("profit_ratio")
+            if v is None:
+                v = t.get("close_profit")
+            if v is None:
+                try:
+                    stake = float(t.get("stake_amount") or 0.0)
+                except (TypeError, ValueError):
+                    stake = 0.0
+                pnl = t.get("profit_abs") or t.get("close_profit_abs") or 0.0
+                try:
+                    v = float(pnl) / stake if stake > 0 else 0.0
+                except (TypeError, ValueError):
+                    v = 0.0
+            try:
+                out.append(float(v))
+            except (TypeError, ValueError):
+                out.append(0.0)
+        return np.asarray(out, dtype=float)
+
+    # ------------------------------------------------------------------ regime bias
+
+    @classmethod
+    def analyze_regime_bias(
+        cls,
+        trades: list,
+        trade_regimes: list,
+        starting_capital: float = 1000.0,
+    ) -> Dict:
+        """
+        How much a strategy likes bear, ranging and bull markets: the trend
+        regime (classify_regime, folded to REGIME_SIDES) in effect at each
+        trade's entry. ``trade_regimes`` holds one classify_regime label per
+        trade (see :meth:`entry_labels`); a None leaves the trade out.
+
+        Each side is compared with every OTHER classified trade on mean
+        per-trade return - the count-invariant measure, thresholds and
+        permutation test the volatility bias uses. All three sides are read
+        off the same shuffles and their p-values are Holm-adjusted: three
+        unadjusted tests at VOL_BIAS_ALPHA would name a regime about 14% of
+        the time for a strategy with no preference at all.
+
+        Per side
+        --------
+        edge_pct : side mean minus rest mean, percent per trade - how much
+                   better (or worse) the strategy does in that regime.
+        verdict  : "Likes" / "Dislikes" when the adjusted p clears
+                   VOL_BIAS_ALPHA, else "Neutral"; "Too few trades" when the
+                   side has fewer than VOL_BIAS_MIN_PER_BUCKET trades, and
+                   "Nearly all trades" when the REST does.
+
+        Returns
+        -------
+        dict with keys: sides, per_side ({side: _metrics_for + share_pct,
+        edge_pct, p_value, verdict}), label, n, unclassified, alpha
+        """
+        sides = cls.REGIME_SIDES
+        groups: Dict[str, list] = {s: [] for s in sides}
+        for t, r in zip(trades, trade_regimes):
+            s = cls._SIDE_OF.get(r)
+            if s is not None:
+                groups[s].append(t)
+        n = sum(len(g) for g in groups.values())
+        min_k = cls.VOL_BIAS_MIN_PER_BUCKET
+        enough = n >= cls.VOL_BIAS_MIN_TRADES
+
+        per_side: Dict[str, Dict] = {}
+        for s in sides:
+            k = len(groups[s])
+            per_side[s] = {
+                **cls._metrics_for(groups[s], starting_capital),
+                "share_pct": round(k / n * 100.0, 2) if n else 0.0,
+                "edge_pct": None,
+                "p_value": None,
+                "verdict": ("Nearly all trades" if enough and k >= min_k and n - k < min_k
+                            else "Too few trades"),
+            }
+
+        tested = [s for s in sides
+                  if enough and len(groups[s]) >= min_k and n - len(groups[s]) >= min_k]
+        if tested:
+            raw_p, edges = cls._permutation_test_sides([groups[s] for s in sides])
+            for i, s in enumerate(sides):
+                if edges[i] is not None:
+                    per_side[s]["edge_pct"] = round(float(edges[i]), 4)
+            adjusted = cls._holm([raw_p[sides.index(s)] for s in tested])
+            for s, p in zip(tested, adjusted):
+                per_side[s]["p_value"] = round(float(p), 4)
+                if p >= cls.VOL_BIAS_ALPHA:
+                    per_side[s]["verdict"] = "Neutral"
+                else:
+                    per_side[s]["verdict"] = "Likes" if per_side[s]["edge_pct"] > 0 else "Dislikes"
+
+        likes = [s.title() for s in sides if per_side[s]["verdict"] == "Likes"]
+        dislikes = [s.title() for s in sides if per_side[s]["verdict"] == "Dislikes"]
+        dominant = [s.title() for s in sides if per_side[s]["verdict"] == "Nearly all trades"]
+        if dominant:
+            label = f"Trades almost only in {dominant[0]}"
+        elif not tested:
+            label = "Not enough data"
+        elif likes and dislikes:
+            label = f"Likes {' & '.join(likes)}, dislikes {' & '.join(dislikes)}"
+        elif likes:
+            label = f"Likes {' & '.join(likes)}"
+        elif dislikes:
+            label = f"Dislikes {' & '.join(dislikes)}"
+        else:
+            label = "No clear preference"
+
+        return {
+            "sides": list(sides),
+            "per_side": per_side,
+            "label": label,
+            "n": n,
+            "unclassified": len(trades) - n,
+            "alpha": cls.VOL_BIAS_ALPHA,
+        }
+
+    @classmethod
+    def _permutation_test_sides(
+        cls, groups: "List[list]"
+    ) -> "Tuple[List[float | None], List[float | None]]":
+        """
+        Two-sided permutation test of each group's mean per-trade return
+        against the mean of all the OTHER groups' trades (in percent), every
+        group from the same resamples: one shuffle of the pooled returns
+        reassigns all trades at once, holding every group's size fixed. Each
+        group's own null distribution is exactly the one a separate
+        two-bucket test (_permutation_test_mean_return) would draw.
+
+        Returns (p_values, observed_differences_pct), one entry per group,
+        None for a group that is empty or holds every trade.
+        """
+        rets = [cls._trade_returns(g) for g in groups]
+        sizes = np.array([r.size for r in rets])
+        n_all = int(sizes.sum())
+        p_values: "List[float | None]" = [None] * len(groups)
+        observed: "List[float | None]" = [None] * len(groups)
+        live = [i for i, k in enumerate(sizes) if 0 < k < n_all]
+        if not live:
+            return p_values, observed
+
+        pooled = np.concatenate(rets)
+        total = pooled.sum()
+        # Groups sit in `pooled` in order, so reduceat over the non-empty
+        # groups' start offsets sums each one; a shuffle of `pooled` then
+        # gives every group a random subset of its own size.
+        nonempty = [i for i, k in enumerate(sizes) if k > 0]
+        starts = np.concatenate([[0], np.cumsum(sizes)[:-1]])[nonempty]
+        pick = [nonempty.index(i) for i in live]
+        k = sizes[live].astype(float)
+
+        def _diffs(arr: "np.ndarray") -> "np.ndarray":
+            s = np.add.reduceat(arr, starts)[pick]
+            return (s / k - (total - s) / (n_all - k)) * 100.0
+
+        obs = _diffs(pooled)
+        threshold = np.abs(obs) - 1e-15
+        rng = np.random.default_rng(20240517)  # fixed: same input -> same answer
+        b = int(cls.VOL_BIAS_RESAMPLES)
+        count = np.zeros(len(live))
+        for _ in range(b):
+            count += np.abs(_diffs(rng.permutation(pooled))) >= threshold
+        for j, i in enumerate(live):
+            # +1/+1 as in _permutation_test_mean_return: never p = 0.
+            p_values[i] = float((count[j] + 1) / (b + 1))
+            observed[i] = float(obs[j])
+        return p_values, observed
+
+    @staticmethod
+    def _holm(p_values: "List[float]") -> "List[float]":
+        """Holm-Bonferroni adjusted p-values, in the order given."""
+        m = len(p_values)
+        adjusted = [0.0] * m
+        running = 0.0
+        for rank, i in enumerate(sorted(range(m), key=lambda j: p_values[j])):
+            running = max(running, min(1.0, (m - rank) * p_values[i]))
+            adjusted[i] = running
+        return adjusted

@@ -47,9 +47,20 @@ def _flat_vars_to_nested_dict(env_dict: dict[str, Any], prefix: str) -> dict[str
     relevant_vars: dict[str, Any] = {}
 
     for env_var, val in sorted(env_dict.items()):
-        if env_var.startswith(prefix):
+        # Case-insensitive prefix match: Windows normalizes every
+        # os.environ key to uppercase regardless of how it was set (verified
+        # against both a `VAR=... python` bash invocation and PowerShell's
+        # `$env:VAR = ...` - both come back as `TRADER__...` here), so a
+        # case-sensitive comparison against the lowercase `prefix` silently
+        # matched nothing on Windows - environment-variable config overrides
+        # never worked there at all. `env_var[len(prefix):]` (not
+        # `.replace(prefix, "")`, which is also case-sensitive and would
+        # leave the un-stripped prefix in `key` once matching goes
+        # case-insensitive) then strips exactly the matched-length prefix
+        # regardless of its actual case.
+        if env_var.upper().startswith(prefix.upper()):
             logger.info(f"Loading variable '{env_var}'")
-            key = env_var.replace(prefix, "")
+            key = env_var[len(prefix):]
             key_parts = key.split("__")
             logger.info("Key parts: %s", key_parts)
 

@@ -33,12 +33,18 @@ class FeatherDataHandler(IDataHandler):
         filename = self._pair_data_filename(self._datadir, pair, timeframe, candle_type)
         self.create_dir_if_needed(filename)
 
-        data.reset_index(drop=True).loc[:, self._columns].to_feather(
-            filename, compression_level=9, compression="lz4"
+        frame = data.reset_index(drop=True).loc[:, self._columns]
+        self._write_atomically(
+            filename, lambda tmp: frame.to_feather(tmp, compression_level=9, compression="lz4")
         )
 
     def _ohlcv_load(
-        self, pair: str, timeframe: str, timerange: TimeRange | None, candle_type: CandleType
+        self,
+        pair: str,
+        timeframe: str,
+        timerange: TimeRange | None,
+        candle_type: CandleType,
+        raise_on_error: bool = False,
     ) -> DataFrame:
         """
         Internal method used to load data for one pair from disk.
@@ -62,6 +68,13 @@ class FeatherDataHandler(IDataHandler):
                 return DataFrame(columns=self._columns)
         try:
             pairdata = read_feather(filename)
+            if "funding_rate" in pairdata.columns:
+                # Funding files also exist as plain `date, funding_rate`. Consumers read the
+                # rate from `open`; without this every such file loaded as empty, so funding
+                # was silently missing from backtests on those pairs.
+                rate = pairdata["funding_rate"]
+                pairdata = pairdata.assign(open=rate, high=rate, low=rate, close=rate, volume=0.0)
+                pairdata = pairdata.loc[:, self._columns]
             pairdata.columns = self._columns
             pairdata = pairdata.astype(
                 dtype={
@@ -82,6 +95,8 @@ class FeatherDataHandler(IDataHandler):
                 pairdata["date"] = to_datetime(_date, unit="ms", utc=True)
             return pairdata
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.exception(
                 f"Error loading data from {filename}. Exception: {e}. Returning empty dataframe."
             )
@@ -109,7 +124,10 @@ class FeatherDataHandler(IDataHandler):
         """
         filename = self._pair_trades_filename(self._datadir, pair, trading_mode)
         self.create_dir_if_needed(filename)
-        data.reset_index(drop=True).to_feather(filename, compression_level=9, compression="lz4")
+        frame = data.reset_index(drop=True)
+        self._write_atomically(
+            filename, lambda tmp: frame.to_feather(tmp, compression_level=9, compression="lz4")
+        )
 
     def trades_append(self, pair: str, data: DataFrame):
         """

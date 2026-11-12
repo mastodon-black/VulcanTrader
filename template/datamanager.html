@@ -3,6 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <script src="/static/theme.js?v=46"></script>
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
@@ -155,12 +156,12 @@
             display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px;
             font-size: 0.7rem; font-weight: 600; letter-spacing: 0.03em;
         }
-        .badge-spot { background: rgba(126,226,168,0.15); color: #7ee2a8; border: 1px solid rgba(126,226,168,0.3); }
-        .badge-futures { background: rgba(127,178,247,0.15); color: #7fb2f7; border: 1px solid rgba(127,178,247,0.3); }
-        .badge-funding_rate { background: rgba(227,179,65,0.15); color: #e3b341; border: 1px solid rgba(227,179,65,0.3); }
-        .badge-mark, .badge-index, .badge-premiumIndex { background: rgba(139,147,163,0.15); color: #9891a8; border: 1px solid rgba(139,147,163,0.3); }
-        .badge-yes { background: rgba(126,226,168,0.15); color: #7ee2a8; border: 1px solid rgba(126,226,168,0.3); }
-        .badge-no { background: rgba(139,147,163,0.12); color: #6f6880; border: 1px solid rgba(139,147,163,0.2); }
+        .badge-spot { background: rgba(var(--pos-rgb),0.15); color: var(--pos); border: 1px solid rgba(var(--pos-rgb),0.3); }
+        .badge-futures { background: rgba(var(--info-rgb),0.15); color: var(--info); border: 1px solid rgba(var(--info-rgb),0.3); }
+        .badge-funding_rate { background: rgba(var(--neu-rgb),0.15); color: var(--neu); border: 1px solid rgba(var(--neu-rgb),0.3); }
+        .badge-mark, .badge-index, .badge-premiumIndex { background: rgba(139,147,163,0.15); color: var(--text-soft); border: 1px solid rgba(139,147,163,0.3); }
+        .badge-yes { background: rgba(var(--pos-rgb),0.15); color: var(--pos); border: 1px solid rgba(var(--pos-rgb),0.3); }
+        .badge-no { background: rgba(139,147,163,0.12); color: var(--text-faint); border: 1px solid rgba(139,147,163,0.2); }
 
         .exchange-row {
             display: flex; align-items: center; justify-content: space-between;
@@ -191,7 +192,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/theme.css?v=45">
+    <link rel="stylesheet" href="/static/theme.css?v=46">
 </head>
 <body>
 <div id="app">
@@ -205,6 +206,20 @@
             </div>
         </div>
         <div class="nav-right">
+            <button class="icon-btn theme-toggle" data-theme-toggle title="Switch light / dark theme" aria-label="Switch light / dark theme">
+                <svg class="ti-moon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                </svg>
+                <svg class="ti-sun" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="5"/>
+                    <line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+                    <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+                    <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+                    <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+                </svg>
+            </button>
             <button class="icon-btn" @click="logout" title="Logout">
                 <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24"
                      fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -223,12 +238,12 @@
         <div class="card">
             <h3>
                 Exchanges
-                <span style="font-size:0.75rem; font-weight:400; color:#9891a8;">
+                <span style="font-size:0.75rem; font-weight:400; color:var(--text-soft);">
                     Click an exchange to view its data coverage
                 </span>
             </h3>
             <div v-if="exchangesLoading" class="loading"><span class="spinner"></span> Loading exchanges…</div>
-            <div v-else-if="exchanges.length === 0" style="text-align:center; color:#9891a8; padding:1.5rem;">
+            <div v-else-if="exchanges.length === 0" style="text-align:center; color:var(--text-soft); padding:1.5rem;">
                 No exchanges found — no configs and no downloaded data yet.
             </div>
             <div v-else class="exchange-grid">
@@ -289,7 +304,7 @@
                         <div class="metric-value" style="font-size:0.95rem;">{{ fmtDate(coverage.summary.latest) }}</div>
                     </div>
                 </div>
-                <div v-if="filteredRows.length === 0" style="text-align:center; color:#9891a8; padding:1.5rem;">
+                <div v-if="filteredRows.length === 0" style="text-align:center; color:var(--text-soft); padding:1.5rem;">
                     No pair/timeframe data matches this filter.
                 </div>
                 <div v-else class="table-wrap">
@@ -319,7 +334,7 @@
         <div class="card">
             <h3>
                 Download Data
-                <span style="font-size:0.75rem; font-weight:400; color:#9891a8;">
+                <span style="font-size:0.75rem; font-weight:400; color:var(--text-soft);">
                     {{ runningDownloadCount }} / {{ jobsMaxConcurrent }} running
                 </span>
             </h3>
@@ -334,49 +349,49 @@
             </div>
             <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px,1fr)); gap:0.75rem; align-items:end;">
                 <div>
-                    <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Config</label>
+                    <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Config</label>
                     <select v-model="downloadForm.config" class="form-input" style="width:100%; margin-top:0.25rem;">
                         <option value="">— select config —</option>
                         <option v-for="c in configs" :key="c.name" :value="c.name">{{ c.name }}</option>
                     </select>
                 </div>
                 <div>
-                    <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;"
+                    <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;"
                            title="Overrides the config's own exchange - leave blank to use the config's exchange">Exchange override</label>
                     <input v-model="downloadForm.exchange" class="form-input" placeholder="(use config's exchange)"
                            style="width:100%; margin-top:0.25rem;">
                 </div>
                 <div>
-                    <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Range</label>
+                    <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Range</label>
                     <select v-model="downloadForm.mode" :disabled="dlIsArchive" class="form-input" style="width:100%; margin-top:0.25rem;">
                         <option value="timerange">Explicit timerange</option>
                         <option value="days">Days back</option>
                     </select>
                 </div>
                 <div v-if="downloadForm.mode === 'days'">
-                    <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;">Days</label>
+                    <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;">Days</label>
                     <input type="number" min="1" v-model.number="downloadForm.days" :disabled="dlIsArchive" class="form-input" style="width:100%; margin-top:0.25rem;">
                 </div>
                 <div v-else>
-                    <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;"
+                    <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;"
                            title="Format: YYYYMMDD-YYYYMMDD (either side may be omitted)">Timerange</label>
                     <input v-model="downloadForm.timerange" :disabled="dlIsArchive" class="form-input" placeholder="20240101-20240601"
                            style="width:100%; margin-top:0.25rem;">
                 </div>
-                <label style="display:flex; align-items:center; gap:0.4rem; padding-bottom:0.5rem; cursor:pointer; font-size:0.85rem; color:#9891a8;">
-                    <input type="checkbox" v-model="downloadForm.erase" style="accent-color:#8b7cf6;">
+                <label style="display:flex; align-items:center; gap:0.4rem; padding-bottom:0.5rem; cursor:pointer; font-size:0.85rem; color:var(--text-soft);">
+                    <input type="checkbox" v-model="downloadForm.erase" style="accent-color:var(--accent);">
                     Erase existing data first
                 </label>
             </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem; margin-top:0.75rem;">
                 <div>
-                    <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;"
+                    <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;"
                            title="Space-separated, e.g. BTC/USDT ETH/USDT - leave blank to use the config's own pairlist">Pairs (optional)</label>
                     <textarea v-model="downloadForm.pairsText" :disabled="dlIsArchive" class="form-input" rows="2" style="width:100%; margin-top:0.25rem; font-family:'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size:0.8rem;"
                               placeholder="Leave blank to use the config's own pairlist. Space-separated, e.g. BTC/USDT ETH/USDT"></textarea>
                 </div>
                 <div>
-                    <label style="font-size:0.72rem; color:#9891a8; text-transform:uppercase; letter-spacing:0.05em;"
+                    <label style="font-size:0.72rem; color:var(--text-soft); text-transform:uppercase; letter-spacing:0.05em;"
                            title="Space-separated, e.g. 15m 1h - leave blank to use the config's own timeframe(s)">Timeframes (optional)</label>
                     <textarea v-model="downloadForm.timeframesText" :disabled="dlIsArchive" class="form-input" rows="2" style="width:100%; margin-top:0.25rem; font-family:'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size:0.8rem;"
                               placeholder="Leave blank to use the config's own timeframe(s). Space-separated, e.g. 15m 1h"></textarea>
@@ -389,7 +404,7 @@
 
             <!-- === JOBS === -->
             <div v-if="downloadJobs.length > 0" style="margin-top:1.25rem;">
-                <h4 style="color:#9891a8; font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em; margin:0 0 0.5rem 0;">
+                <h4 style="color:var(--text-soft); font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em; margin:0 0 0.5rem 0;">
                     Download Jobs
                 </h4>
                 <div class="table-wrap" style="max-height:260px;">
@@ -402,19 +417,19 @@
                         <tbody>
                             <tr v-for="j in downloadJobs" :key="j.id"
                                 @click="selectJob(j.id)"
-                                :style="{ cursor: 'pointer', background: selectedJobId === j.id ? 'rgba(139,124,246,0.12)' : '' }">
+                                :style="{ cursor: 'pointer', background: selectedJobId === j.id ? 'rgba(var(--accent-rgb),0.12)' : '' }">
                                 <td><span :style="{ color: jobStatusColor(j.status), fontWeight: 600 }">{{ j.status }}</span></td>
                                 <td>{{ j.config }}</td>
                                 <td>{{ j.exchange || '(config default)' }}</td>
                                 <td>{{ j.timerange || (j.days ? j.days + 'd back' : '—') }}</td>
                                 <td style="min-width:120px;">
                                     <div style="display:flex; align-items:center; gap:0.4rem;">
-                                        <div style="flex:1; height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden; min-width:60px;">
-                                            <div :style="{ width: jobProgressPct(j) + '%', height: '100%', background: '#8b7cf6', transition: 'width 0.3s' }"></div>
+                                        <div style="flex:1; height:6px; background:var(--bar-track); border-radius:3px; overflow:hidden; min-width:60px;">
+                                            <div :style="{ width: jobProgressPct(j) + '%', height: '100%', background: 'var(--accent)', transition: 'width 0.3s' }"></div>
                                         </div>
-                                        <span style="font-size:0.72rem; color:#9891a8; white-space:nowrap;">{{ jobProgressPct(j) }}%</span>
+                                        <span style="font-size:0.72rem; color:var(--text-soft); white-space:nowrap;">{{ jobProgressPct(j) }}%</span>
                                     </div>
-                                    <div v-if="j.dl_units_total" style="font-size:0.68rem; color:#6f6880;">{{ j.dl_units_done }} / {{ j.dl_units_total }}</div>
+                                    <div v-if="j.dl_units_total" style="font-size:0.68rem; color:var(--text-faint);">{{ j.dl_units_done }} / {{ j.dl_units_total }}</div>
                                 </td>
                                 <td>{{ jobElapsedStr(j) }}</td>
                                 <td>{{ jobEtaStr(j) }}</td>
@@ -430,16 +445,16 @@
                 </div>
 
                 <div v-if="selectedJob" style="margin-top:0.75rem;">
-                    <div style="display:flex; align-items:center; justify-content:space-between; gap:0.75rem; font-size:0.75rem; color:#9891a8; margin-bottom:0.25rem; flex-wrap:wrap;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:0.75rem; font-size:0.75rem; color:var(--text-soft); margin-bottom:0.25rem; flex-wrap:wrap;">
                         <span>Job log {{ selectedJob.id }} ({{ selectedJob.status }}<span v-if="selectedJob.exit_code !== null && selectedJob.exit_code !== undefined">, exit {{ selectedJob.exit_code }}</span>)</span>
-                        <span v-if="selectedJob.dl_units_total" style="color:#9891a8;">
+                        <span v-if="selectedJob.dl_units_total" style="color:var(--text-soft);">
                             {{ jobProgressPct(selectedJob) }}% ({{ selectedJob.dl_units_done }}/{{ selectedJob.dl_units_total }})
                             &nbsp;·&nbsp; Elapsed {{ jobElapsedStr(selectedJob) }}
                             &nbsp;·&nbsp; ETA {{ jobEtaStr(selectedJob) }}
                         </span>
                     </div>
                     <pre ref="jobLogPre"
-                         style="max-height:320px; background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:0.75rem; overflow:auto; font-size:0.75rem; line-height:1.4; color:#9891a8; margin:0; white-space:pre-wrap;">{{ jobLogText || '(no output yet)' }}</pre>
+                         style="max-height:320px; background:var(--log-bg); border:1px solid var(--border); border-radius:6px; padding:0.75rem; overflow:auto; font-size:0.75rem; line-height:1.4; color:var(--text-soft); margin:0; white-space:pre-wrap;">{{ jobLogText || '(no output yet)' }}</pre>
                 </div>
             </div>
         </div>
@@ -656,8 +671,8 @@ createApp({
             } catch (e) { /* polling: stay quiet */ }
         },
         jobStatusColor(s) {
-            return ({ running: '#e3b341', queued: '#9891a8', succeeded: '#7ee2a8',
-                     failed: '#f4879b', cancelled: '#9891a8', error: '#f4879b' })[s] || '#e8e5ef';
+            return ({ running: 'var(--neu)', queued: 'var(--text-soft)', succeeded: 'var(--pos)',
+                     failed: 'var(--neg)', cancelled: 'var(--text-soft)', error: 'var(--neg)' })[s] || 'var(--text)';
         },
         jobProgressPct(j) {
             if (!j.dl_units_total) return j.status === 'succeeded' ? 100 : 0;

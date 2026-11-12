@@ -41,9 +41,13 @@ from VulcanTrader.exchange.exchange_utils_timeframe import (
     timeframe_to_resample_freq,
     timeframe_to_seconds,
 )
+from VulcanTrader.exchange.futures_sim import Futuressim
 from VulcanTrader.exchange.hitbtc import Hitbtc
 from VulcanTrader.exchange.hyperliquid import Hyperliquid
 from VulcanTrader.exchange.kraken import Kraken
 from VulcanTrader.exchange.kucoin import Kucoin
+from VulcanTrader.exchange.metatrader import Metatrader
+from VulcanTrader.exchange.ninjatrader import Ninjatrader
 from VulcanTrader.exchange.okx import Okx
 from VulcanTrader.exchange.polymarket import Polymarket
+from VulcanTrader.exchange.rithmic import Rithmic

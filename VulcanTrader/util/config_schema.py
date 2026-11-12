@@ -818,6 +818,11 @@ CONF_SCHEMA = {
             "description": "Fleet-wide (system.json). If true, runs every bot as a thread in one process instead of one OS process each.",
             "type": "boolean",
         },
+        "fleet_worker_processes": {
+            "description": "Fleet-wide (system.json), used with single_process_mode. Number of worker processes the autostart fleet is split across, each hosting its share of bots as threads, so the fleet can use more than one CPU core. 1 (default) hosts every bot in the webserver process itself.",
+            "type": "integer",
+            "minimum": 1,
+        },
         "auto_start_data_server": {
             "description": "Fleet-wide (system.json). If true (default), a bot with no reachable data_server master launches one itself.",
             "type": "boolean",
@@ -840,6 +845,49 @@ CONF_SCHEMA = {
                 "Both master ports are unauthenticated - only widen on a trusted network."
             ),
             "type": "string",
+        },
+        "ninjatrader": {
+            "description": (
+                "Fleet-wide (system.json) NinjaTrader 8 settings for the ninjatrader exchange. "
+                "Keys not listed here (e.g. account, contract_months) are allowed."
+            ),
+            "type": "object",
+            "properties": {
+                "auto_start": {
+                    "description": (
+                        "Start NinjaTrader 8 when the fleet starts (bot.py webserver / autostart), "
+                        "unless it is already up, owned by the supervised nt8-autostart.service, or "
+                        "host is another machine. Linux: the repo's headless Wine launcher in a "
+                        "memory-capped systemd-run --user unit; Windows: opens NinjaTrader.exe (log in "
+                        "yourself). Default false. See util/ninjatrader_launcher.py."
+                    ),
+                    "type": "boolean",
+                },
+                "host": {
+                    "description": "Host where the VulcanTraderBridge AddOn listens (the PC running NT8). Default 127.0.0.1.",
+                    "type": "string",
+                },
+                "port": {
+                    "description": "VulcanTraderBridge AddOn port. Default 8755.",
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                },
+                "memory_max": {
+                    "description": "Linux: RAM cap for an NT8 started by auto_start (systemd MemoryMax). Default 3G.",
+                    "type": "string",
+                    "pattern": r"^(\d+[KMGT]?|infinity)$",
+                },
+                "memory_swap_max": {
+                    "description": "Linux: swap cap for an NT8 started by auto_start (systemd MemorySwapMax). Default 2G.",
+                    "type": "string",
+                    "pattern": r"^(\d+[KMGT]?|infinity)$",
+                },
+                "exe_path": {
+                    "description": "Windows: NinjaTrader.exe path. Default %ProgramFiles%\\NinjaTrader 8\\bin\\NinjaTrader.exe.",
+                    "type": "string",
+                },
+            },
         },
         "data_server": {
             "description": "Per-bot data_server settings, overriding the system.json-wide defaults above.",
@@ -1058,6 +1106,71 @@ CONF_SCHEMA = {
                 "private_key": {
                     "description": "Private key for the exchange, if required. Usually used by DEX exchanges. " f"{__VIA_ENV} VulcanTrader__EXCHANGE__PRIVATE_KEY",
                     "type": "string",
+                },
+                "rithmic_system_name": {
+                    "description": "Rithmic system name to log into (e.g. 'Rithmic Test', 'Rithmic Paper Trading'). "
+                    "Only used by the 'rithmic' exchange. " f"{__VIA_ENV} trader__EXCHANGE__RITHMIC_SYSTEM_NAME",
+                    "type": "string",
+                },
+                "rithmic_gateway": {
+                    "description": "Rithmic gateway host:port to connect to (e.g. 'rituz00100.rithmic.com:443'). "
+                    "Only used by the 'rithmic' exchange. " f"{__VIA_ENV} trader__EXCHANGE__RITHMIC_GATEWAY",
+                    "type": "string",
+                },
+                "rithmic_app_name": {
+                    "description": "App name Rithmic was given for API access. Only used by the 'rithmic' exchange. "
+                    f"{__VIA_ENV} trader__EXCHANGE__RITHMIC_APP_NAME",
+                    "type": "string",
+                },
+                "rithmic_app_version": {
+                    "description": "App version string reported to Rithmic. Only used by the 'rithmic' exchange. "
+                    f"{__VIA_ENV} trader__EXCHANGE__RITHMIC_APP_VERSION",
+                    "type": "string",
+                },
+                "ninjatrader_account": {
+                    "description": "Exact NT8 account name to route orders through/report balances for "
+                    "(e.g. 'Sim101' for paper, your live account's name, or whatever account a Market "
+                    "Replay connection is driving - this one field is what distinguishes sim/live/replay). "
+                    "Required. Only used by the 'ninjatrader' exchange. "
+                    f"{__VIA_ENV} trader__EXCHANGE__NINJATRADER_ACCOUNT",
+                    "type": "string",
+                },
+                "ninjatrader_host": {
+                    "description": "Host the VulcanTraderBridge NinjaScript AddOn's TCP listener is bound "
+                    "to inside NT8 (default '127.0.0.1' - NT8 normally runs on the same machine as the "
+                    "bot). Only used by the 'ninjatrader' exchange. "
+                    f"{__VIA_ENV} trader__EXCHANGE__NINJATRADER_HOST",
+                    "type": "string",
+                    "default": "127.0.0.1",
+                },
+                "ninjatrader_port": {
+                    "description": "Port the VulcanTraderBridge NinjaScript AddOn's TCP listener is bound "
+                    "to inside NT8 (default 8755 - must match the port compiled into the AddOn). Only "
+                    "used by the 'ninjatrader' exchange. " f"{__VIA_ENV} trader__EXCHANGE__NINJATRADER_PORT",
+                    "type": "integer",
+                    "default": 8755,
+                },
+                "metatrader_server": {
+                    "description": "Broker server name to log into (e.g. 'MetaQuotes-Demo', "
+                    "'EightcapGlobal-Live'). Only used by the 'metatrader' exchange - leave unset "
+                    "(along with 'key'/'password') to attach to whatever account an already-running, "
+                    "already-logged-in MT5 terminal has open. " f"{__VIA_ENV} trader__EXCHANGE__METATRADER_SERVER",
+                    "type": "string",
+                },
+                "metatrader_path": {
+                    "description": "Explicit path to a specific MetaTrader 5 installation's terminal64.exe, "
+                    "only needed when more than one installation exists on this machine. Only used by the "
+                    "'metatrader' exchange. " f"{__VIA_ENV} trader__EXCHANGE__METATRADER_PATH",
+                    "type": "string",
+                },
+                "metatrader_enable_live_orders": {
+                    "description": "Second, explicit opt-in (on top of dry_run: false) required before the "
+                    "'metatrader' exchange will ever call mt5.order_send() for real - see "
+                    "metatrader.py's module docstring. Defaults to false, meaning a config with dry_run: "
+                    "false but this left unset places NO real orders, it just fails loudly instead. Only "
+                    "used by the 'metatrader' exchange. " f"{__VIA_ENV} trader__EXCHANGE__METATRADER_ENABLE_LIVE_ORDERS",
+                    "type": "boolean",
+                    "default": False,
                 },
                 "pair_whitelist": {
                     "description": "List of whitelisted trading pairs.",

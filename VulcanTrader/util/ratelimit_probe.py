@@ -44,9 +44,9 @@
 #
 #  Usage
 #  -----
-#      python -m VulcanTrader.ratelimit_probe
-#      python -m VulcanTrader.ratelimit_probe --exchanges binance okx
-#      python -m VulcanTrader.ratelimit_probe --all --counts 5 10 20 40 80
+#      python -m VulcanTrader.util.ratelimit_probe
+#      python -m VulcanTrader.util.ratelimit_probe --exchanges binance okx
+#      python -m VulcanTrader.util.ratelimit_probe --all --counts 5 10 20 40 80
 # =============================================================================
 
 """Probe exchanges to find how many pairs in one OHLCV refresh trigger rate limiting."""

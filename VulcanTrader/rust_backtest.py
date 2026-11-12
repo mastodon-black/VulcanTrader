@@ -88,6 +88,7 @@ _EXIT_REASON_MAP = {
     "RoiTarget": "roi",
     "Stoploss": "stop_loss",
     "TrailingStop": "trailing_stop_loss",
+    "Liquidation": "liquidation",
     "MaxHoldPeriod": "force_exit",
     "CciExit": "exit_signal",
     "RsiExit": "exit_signal",
@@ -107,20 +108,42 @@ def _parse_timeframe_minutes(tf: str) -> int:
     return max(1, amount * mult)
 
 
+def liquidation_price_isolated(price: float, leverage: float, max_leverage: float,
+                               is_short: bool, buffer: float) -> float:
+    """Hyperliquid's isolated-margin liquidation price (`hyperliquid.dry_run_liquidation_price`,
+    what dry-run/paper bots use) plus `Exchange.get_liquidation_price`'s buffer. Maintenance
+    margin = half the initial margin at the pair's max leverage. 0.0 = never liquidates."""
+    if price <= 0 or leverage <= 1.0 or max_leverage <= 0:
+        return 0.0
+    ll = 1.0 / (2.0 * max_leverage)
+    side = -1.0 if is_short else 1.0
+    dist = (1.0 / leverage - ll) / (1.0 - ll * side)
+    if dist <= 0:
+        return 0.0
+    liq = price * (1.0 - side * dist)
+    liq += side * abs(price - liq) * buffer  # the buffer moves it toward the entry
+    return max(liq, 0.0)
+
+
 def _build_engine_config(strategy: Any, config: dict) -> dict:
     """Translate the freqtrade strategy/config into the joint simulator's keys."""
     tf = getattr(strategy, "timeframe", None) or config.get("timeframe", "15m")
     tf_min = _parse_timeframe_minutes(tf)
 
     # minimal_roi {minute_str: roi} -> 4 ROI tiers (bar-indexed).
-    roi = getattr(strategy, "minimal_roi", None) or {"0": 0.10}
+    # An empty minimal_roi means "no ROI exits" in freqtrade (live): min_roi_reached finds no tier. The old
+    # `or {"0": 0.10}` turned it into a 10% take-profit in every rust backtest (TritonWave: 216 ROI exits at
+    # +10%, +$410k, that live can never make). No attribute at all = the resolver's {"0": 10.0}.
+    roi = getattr(strategy, "minimal_roi", None)
+    if roi is None:
+        roi = {"0": 10.0}
+    if not roi and (config.get("backtest_legacy") or {}).get("exit_settings_ignored"):
+        roi = {"0": 0.10}
     tiers = sorted(((int(k), float(v)) for k, v in roi.items()), key=lambda x: x[0])
-    tiers = tiers[:4]
-    roi_vals = [99.0, 99.0, 99.0, 99.0]
-    roi_periods = [10**9, 10**9, 10**9, 10**9]
-    for i, (minute, val) in enumerate(tiers):
-        roi_vals[i] = val
-        roi_periods[i] = math.ceil(minute / tf_min) if tf_min else 0
+    if (config.get("backtest_legacy") or {}).get("exit_settings_ignored"):
+        tiers = tiers[:4]   # legacy: only the first four tiers ever applied (live uses them all)
+    roi_vals = [val for _, val in tiers] or [99.0]
+    roi_periods = [(math.ceil(minute / tf_min) if tf_min else 0) for minute, _ in tiers] or [10**9]
 
     fee = float(config.get("fee", 0.0005) or 0.0005)
     trade_type = "spot" if str(config.get("trading_mode", "futures")) == "spot" else "futures"
@@ -135,6 +158,7 @@ def _build_engine_config(strategy: Any, config: dict) -> dict:
     # model — at offset 0 the limit price IS the bar's open, so every order
     # fills instantly exactly as before.
     lim = config.get("limit_order_simulation", {}) or {}
+    legacy = config.get("backtest_legacy") or {}
 
     def _offset(cfg_key: str, attr: str) -> float:
         raw = getattr(strategy, attr, None)
@@ -188,6 +212,9 @@ def _build_engine_config(strategy: Any, config: dict) -> dict:
     if isinstance(stake, (int, float)) and stake > 0:
         fixed_stake, compounding = float(stake), False
     else:  # "unlimited" -> wallet split across max_open_trades, then compounds
+        # `max_trade_amount` is only the FIRST trade's stake here (it also
+        # feeds the per-pair leverage-tier lookup). It is not a cap: each
+        # entry re-splits the current balance, see `current_stake()`.
         slots = int(config.get("max_open_trades", 1) or 1)
         fixed_stake = wallet * ratio / max(slots, 1)
         compounding = True
@@ -204,6 +231,46 @@ def _build_engine_config(strategy: Any, config: dict) -> dict:
             atr_mult = 0.0
 
     return {
+        # A candle gives open/high/low/close but not their order. When a resting limit fills
+        # mid-candle (a buy at the low, say), that candle's high may have come BEFORE the fill,
+        # so judging ROI from it on the fill bar books a sale that preceded the purchase.
+        # Measured on VolML limit_fade (5%, 15m): ~10% of trades round-tripped on their fill
+        # candle, earning more than the whole strategy. Default: no ROI on a mid-bar fill's own
+        # bar. `limit_order_simulation.fill_bar_roi: true` restores the old behaviour.
+        "fill_bar_roi": bool(lim.get("fill_bar_roi", False)),
+        # Two engine defects fixed 2026-11-06, each restorable for reproducing older results:
+        # `custom_exit_lookahead` (custom_exit read this bar's high/low through trade.min/max_rate
+        # and exited at its open) and `trailing_offset_unlevered` (the entry-candle trailing price
+        # used trailing_stop_positive_offset, a leveraged profit ratio, as a price move).
+        "custom_exit_lookahead": bool(legacy.get("custom_exit_lookahead", False)),
+        "trailing_offset_unlevered": bool(legacy.get("trailing_offset_unlevered", False)),
+        # Neither rust engine modelled liquidation before 2026-11-06: a 10x trade with a -99%
+        # stop rode a 9% drop and recovered in the backtest, while paper (and live) were
+        # liquidated at ~5%. Isolated Hyperliquid futures only (the formula is theirs).
+        "liquidation_enabled": (
+            trade_type == "futures"
+            and str((config.get("exchange") or {}).get("name", "")).lower() == "hyperliquid"
+            and str(config.get("margin_mode", "isolated") or "isolated").lower() == "isolated"
+            and not legacy.get("no_liquidation", False)
+        ),
+        "liquidation_buffer": float(config.get("liquidation_buffer", 0.05) or 0.0),
+        # A candle has no order for its high and low. freqtrade's worst case for a trailing stop
+        # that arms and fires in one candle applied only to the entry candle, and ROI was checked
+        # before the trailing stop: a 0.05% trail that arms at +1.25% was booked as a +3.9% ROI
+        # exit (live, the trail fires at the first pullback after arming, far below any ROI).
+        # Default: the worst case on every candle that arms the trail, and ROI that can only be
+        # reached past the arming level yields to the trailing stop. `intrabar_optimistic: true`
+        # restores the old order.
+        "intrabar_optimistic": bool(legacy.get("intrabar_optimistic", False)),
+        # Exit settings live trading obeys and both rust engines used to ignore (2026-11-07): a strategy with
+        # use_exit_signal = False got exit signals (and custom_exit) in backtests only, exit_profit_only's
+        # profit floor never applied (TritonWave: exits only above +10% live, on every signal in backtests),
+        # and ignore_roi_if_entry_signal never skipped ROI. `exit_settings_ignored: true` restores that.
+        "use_exit_signal": bool(getattr(strategy, "use_exit_signal", True)),
+        "exit_profit_only": bool(getattr(strategy, "exit_profit_only", False)),
+        "exit_profit_offset": float(getattr(strategy, "exit_profit_offset", 0.0) or 0.0),
+        "ignore_roi_if_entry_signal": bool(getattr(strategy, "ignore_roi_if_entry_signal", False)),
+        "exit_settings_ignored": bool(legacy.get("exit_settings_ignored", False)),
         "timeframe": tf,
         "timeframe_minutes": tf_min,
         "trade_type": "Spot" if trade_type == "spot" else "Futures",
@@ -401,8 +468,8 @@ class _PairState:
         "row_idx", "in_position", "is_short", "entry_price", "base_price",
         "entry_row", "trade_leverage", "stop_loss_price", "stop_is_trailing",
         "stop_loss_dist",
-        "trailing_activated", "exchange_max_leverage", "precision", "trade_stake",
-        "trade_amount", "local_trade", "entry_fee",
+        "trailing_activated", "exchange_max_leverage", "precision", "trade_stake", "liq_price",
+        "trade_amount", "local_trade", "entry_fee", "fill_intrabar",
         # Resting-order state (all inert unless a limit offset is configured).
         # An entry order holds its already-resolved stake/leverage/amount: those
         # are fixed when the order is PLACED (that's when freqtrade calls
@@ -437,6 +504,7 @@ class _PairState:
         self.exchange_max_leverage = exchange_max_leverage
         self.trade_leverage = 1.0
         self.stop_loss_price = 0.0
+        self.liq_price = 0.0  # 0.0 = no liquidation modelled for this trade
         self.stop_is_trailing = False
         # freqtrade's `LocalTrade.stop_loss_pct`, already divided by leverage:
         # the ratio that produced the CURRENT stop, needed by
@@ -446,6 +514,9 @@ class _PairState:
         self.trade_stake = 0.0
         self.trade_amount = 0.0
         self.entry_fee = 0.0  # this trade's own entry fee (maker if it rested)
+        # True when the entry filled INSIDE its bar rather than at the bar's open; see
+        # `fill_bar_roi` in `_build_engine_config`.
+        self.fill_intrabar = False
         self.local_trade = None  # the registered LocalTrade while a position is open
         self.pending_entry = False
         self.pending_entry_price = 0.0
@@ -518,6 +589,7 @@ def _joint_multi_pair_backtest(
     entry_offset = float(eng.get("entry_limit_offset", 0.0) or 0.0)
     exit_offset = float(eng.get("exit_limit_offset", 0.0) or 0.0)
     entry_rests = entry_order_type == "limit" and entry_offset > 0.0
+    fill_bar_roi = bool(eng.get("fill_bar_roi", False))
     exit_rests = exit_order_type == "limit" and exit_offset > 0.0
     # None = no engine-level timeout; the order rests until it fills, or until
     # the strategy cancels it via check_*_timeout / adjust_order_price.
@@ -536,6 +608,16 @@ def _joint_multi_pair_backtest(
     trailing_offset = eng["trailing_offset"]
     trailing_offset_set = eng["trailing_offset_set"]
     trailing_only_offset = eng["trailing_only_offset"]
+    custom_exit_lookahead = bool(eng.get("custom_exit_lookahead", False))
+    exit_settings_ignored = bool(eng.get("exit_settings_ignored", False))
+    use_exit_signal = bool(eng.get("use_exit_signal", True)) or exit_settings_ignored
+    exit_profit_only = bool(eng.get("exit_profit_only", False)) and not exit_settings_ignored
+    exit_profit_offset = float(eng.get("exit_profit_offset", 0.0) or 0.0)
+    ignore_roi_if_entry_signal = bool(eng.get("ignore_roi_if_entry_signal", False)) and not exit_settings_ignored
+    liquidation_enabled = bool(eng.get("liquidation_enabled", False))
+    intrabar_optimistic = bool(eng.get("intrabar_optimistic", False))
+    liquidation_buffer = float(eng.get("liquidation_buffer", 0.05))
+    trailing_offset_unlevered = bool(eng.get("trailing_offset_unlevered", False))
     roi_enabled = eng["roi_enabled"]
     roi_vals = eng["roi_vals"]
     roi_periods = eng["roi_periods"]
@@ -577,6 +659,10 @@ def _joint_multi_pair_backtest(
     # row_idx advances in the main loop below, mirroring backtesting.py's
     # `required_startup + row_index` exactly.
     _dp_wired = dataprovider is not None and full_signals is not None
+    import os as _vt_dbg_os
+    if _vt_dbg_os.environ.get("VT_ADXINV_DEBUG2"):
+        with open(_vt_dbg_os.environ["VT_ADXINV_DEBUG2"], "a") as _vt_dbg_f:
+            print(f"_dp_wired={_dp_wired} dataprovider={dataprovider!r} full_signals_keys={list(full_signals.keys()) if full_signals else None}", file=_vt_dbg_f)
     if _dp_wired:
         _candle_type = config.get("candle_type_def", CandleType.SPOT)
         _tf = eng["timeframe"]
@@ -610,7 +696,7 @@ def _joint_multi_pair_backtest(
         pair_states[pair] = _PairState(dates, openp, high, low, atr, el, xl, es, xs, exch_max_lev, precision)
 
     if not pair_states:
-        return [], 0
+        return [], 0, {}
 
     pair_whitelist = list(pair_states.keys())  # dict preserves the caller's insertion order
     all_dates = np.unique(np.concatenate([p.dates for p in pair_states.values()]))
@@ -675,7 +761,13 @@ def _joint_multi_pair_backtest(
     def current_stake() -> float:
         if not compounding:
             return fixed_stake
-        return min(running_balance * tradable_ratio, max_trade_amount)
+        # freqtrade's `Wallets._calculate_unlimited_stake_amount`:
+        # (available + tied_up) / max_open_trades, limited to available. With
+        # tradable_balance_ratio <= 1 that is balance*ratio/slots, so the stake
+        # grows and shrinks with the realized balance.
+        total_stake_amount = running_balance * tradable_ratio
+        slots = max_open_trades if max_open_trades > 0 else 1
+        return min(total_stake_amount / slots, total_stake_amount - tied_up_capital)
 
     def capital_available(stake: float) -> bool:
         """freqtrade's `Wallets.get_trade_stake_amount` /
@@ -1156,6 +1248,7 @@ def _joint_multi_pair_backtest(
         p.base_price = base_price
         p.entry_price = base_price * ((1.0 + p.entry_fee) if not is_short else (1.0 - p.entry_fee))
         p.entry_row = i
+        p.fill_intrabar = base_price != p.open[i]
         p.trade_leverage = lev
         p.trade_stake = actual_stake
         p.trade_amount = amount
@@ -1165,6 +1258,8 @@ def _joint_multi_pair_backtest(
         raw_stop = base_price * (1.0 + (base_stoploss / lev if not is_short else -base_stoploss / lev))
         p.stop_loss_price = _round_stop(raw_stop, p.precision[i], is_short)
         p.stop_loss_dist = abs(base_stoploss) / lev
+        p.liq_price = liquidation_price_isolated(base_price, lev, p.exchange_max_leverage, is_short,
+                                                 liquidation_buffer) if liquidation_enabled else 0.0
 
         # The trade and its order already exist (created at placement); the
         # fill just completes them.
@@ -1177,6 +1272,24 @@ def _joint_multi_pair_backtest(
                 trade.stake_amount = actual_stake
                 trade.max_stake_amount = actual_stake
                 trade.fee_open = p.entry_fee
+                # `LocalTrade.__init__` computed `open_trade_value` from the
+                # PLACEHOLDER `amount=0.0` this trade was registered with at
+                # order placement (see `do_enter`) — recompute it now that the
+                # real fill amount/rate/fee are known. Missing this left
+                # `open_trade_value` permanently 0.0 for every trade's whole
+                # life, so `trade.calc_profit(rate)` (called by e.g.
+                # ChampionPositionSizerMixin.confirm_trade_exit) returned
+                # `close_trade_value - 0` — essentially the trade's raw
+                # notional value, not its actual profit. Always positive, so
+                # any strategy feeding that into a win/loss-streak or
+                # equity-curve read (ChampionPositionSizer's `_Streak`/
+                # `_EquityMA`) never saw a real loss, ever — a real, silent
+                # correctness bug found 2026-09-27 while verifying the native
+                # engine's `confirm_trade_exit` bridge against this reference
+                # (the native engine never had it: it builds `LocalTrade` with
+                # the final fill amount from the start, so its own
+                # `recalc_open_trade_value()` was already correct).
+                trade.recalc_open_trade_value()
             except Exception:
                 logger.debug("LocalTrade fill update failed for %s", pair, exc_info=True)
             order = p.pending_entry_order
@@ -1237,8 +1350,21 @@ def _joint_multi_pair_backtest(
         # exception-to-False handling around custom_exit/custom_stoploss —
         # so the callback always looked like "no exit"/"no adjustment" with
         # no visible error.
+        #
+        # custom_exit() is evaluated at this bar's OPEN (current_rate=open_i)
+        # and its exit fills at that open. If min/max already include this
+        # bar's high/low it can see the coming dip before it happens and exit
+        # ahead of it: AdaptiveMAEMFE's mae_cut, which reads trade.min_rate,
+        # left at the open of every bar that later fell through its threshold,
+        # while live can only react after the move. Default (2026-11-06):
+        # custom_exit sees min/max through the previous bar plus this open;
+        # this bar's high/low are added after it. `backtest_legacy:
+        # {"custom_exit_lookahead": true}` restores the old order.
         if p.local_trade is not None:
-            p.local_trade.adjust_min_max_rates(high_i, low_i)
+            if custom_exit_lookahead:
+                p.local_trade.adjust_min_max_rates(high_i, low_i)
+            else:
+                p.local_trade.adjust_min_max_rates(open_i, open_i)
 
         # freqtrade's `_run_funding_fees` re-accrues `trade.funding_fees` on
         # EVERY bar the trade is open (open_date -> current bar), and
@@ -1267,10 +1393,72 @@ def _joint_multi_pair_backtest(
             close_value_bound = amount * bound * (1.0 + fee) - funding_so_far
             leveraged_bound_return = (1.0 - (close_value_bound / open_value)) * lev if open_value else 0.0
 
+        # freqtrade should_exit: `if exit_ and not enter` — a same-direction
+        # entry signal on this bar suppresses the exit-signal reading.
+        if is_long:
+            raw_exit_signal = (p.xl[i] > 0) and not (p.el[i] > 0)
+        else:
+            raw_exit_signal = (p.xs[i] > 0) and not (p.es[i] > 0)
+        same_side_entry = (p.el[i] > 0) if is_long else (p.es[i] > 0)
+
+        def _open_profit():
+            """Leveraged profit at this bar's open (freqtrade's current_profit at `rate`)."""
+            if is_long:
+                ov = amount * base_price * (1.0 + fee_open)
+                cv = amount * open_i * (1.0 - fee) + funding_so_far
+                return ((cv / ov) - 1.0) * lev if ov else 0.0
+            ov = amount * base_price * (1.0 - fee_open)
+            cv = amount * open_i * (1.0 + fee) - funding_so_far
+            return (1.0 - (cv / ov)) * lev if ov else 0.0
+
+        # freqtrade's should_exit: exit signals and custom_exit only exist when use_exit_signal is on; a raw
+        # signal blocked by exit_profit_only (profit at the open not above the offset) also skips custom_exit.
+        signal_exit_triggered = use_exit_signal and raw_exit_signal and (
+            not exit_profit_only or _open_profit() > exit_profit_offset)
+
+        def _eval_custom_exit():
+            """custom_exit() at this bar's open -> (triggered, tag). Only when
+            there's no raw exit-signal this bar (freqtrade's `should_exit`),
+            using the bar's OPEN (`current_rate = rate = row[OPEN_IDX]`) — NOT
+            the high/low `bound` used for stoploss/ROI/trailing."""
+            if not use_exit_signal or raw_exit_signal or not _dp_wired or p.local_trade is None:
+                return False, None
+            current_time_ce = pd.Timestamp(p.dates[i]).tz_localize("UTC")
+            if is_long:
+                ov_ce = amount * base_price * (1.0 + fee_open)
+                cv_ce = amount * open_i * (1.0 - fee) + funding_so_far
+                leveraged_open_return = ((cv_ce / ov_ce) - 1.0) * lev if ov_ce else 0.0
+            else:
+                ov_ce = amount * base_price * (1.0 - fee_open)
+                cv_ce = amount * open_i * (1.0 + fee) - funding_so_far
+                leveraged_open_return = (1.0 - (cv_ce / ov_ce)) * lev if ov_ce else 0.0
+            try:
+                reason_cust = strategy.custom_exit(
+                    pair=pair, trade=p.local_trade, current_time=current_time_ce,
+                    current_rate=open_i, current_profit=leveraged_open_return,
+                )
+            except Exception:
+                logger.debug("strategy.custom_exit(%s) raised", pair, exc_info=True)
+                reason_cust = False
+            if reason_cust:
+                return True, (reason_cust if isinstance(reason_cust, str) else None)
+            return False, None
+
+        if not custom_exit_lookahead:
+            # Decide at the open first, then let this bar's range into
+            # min/max for custom_stoploss and the trailing/ROI/stop checks.
+            custom_exit_triggered, custom_exit_tag = _eval_custom_exit()
+            if p.local_trade is not None:
+                p.local_trade.adjust_min_max_rates(high_i, low_i)
+
         stop_loss_price = p.stop_loss_price
         stop_is_trailing = p.stop_is_trailing
         stop_loss_dist = p.stop_loss_dist
         trailing_activated = p.trailing_activated
+        armed_at_open = p.trailing_activated
+        # freqtrade's pure native-trailing setup (the one its entry-candle worst case covers).
+        pess_trailing = (not use_custom_stoploss and trailing_enabled and trailing_only_offset
+                         and trailing_offset_set and bool(trailing_offset))
         dir_correct = (stop_loss_price < low_i) if is_long else (stop_loss_price > high_i)
 
         # freqtrade's `adjust_stop_loss` rounds EVERY candidate to the pair's
@@ -1343,46 +1531,20 @@ def _joint_multi_pair_backtest(
                         stop_loss_dist = trail_dist
 
         stop_triggered = (low_i <= stop_loss_price) if is_long else (high_i >= stop_loss_price)
-        roi_triggered = roi_enabled and (
-            (time_in_position >= roi_periods[0] and leveraged_bound_return >= roi_vals[0]) or
-            (time_in_position >= roi_periods[1] and leveraged_bound_return >= roi_vals[1]) or
-            (time_in_position >= roi_periods[2] and leveraged_bound_return >= roi_vals[2]) or
-            (time_in_position >= roi_periods[3] and leveraged_bound_return >= roi_vals[3])
-        )
-        # freqtrade should_exit: `if exit_ and not enter` — a same-direction
-        # entry signal on this bar suppresses the exit-signal reading.
-        if is_long:
-            signal_exit_triggered = (p.xl[i] > 0) and not (p.el[i] > 0)
-        else:
-            signal_exit_triggered = (p.xs[i] > 0) and not (p.es[i] > 0)
+        # freqtrade's `trader_stoploss_reached`: liquidation wins only when the liquidation price
+        # sits inside the stop (a stop past it can never be reached).
+        liq = p.liq_price
+        liq_triggered = liq > 0 and (
+            (is_long and liq >= stop_loss_price and low_i <= liq)
+            or (not is_long and liq <= stop_loss_price and high_i >= liq))
+        roi_triggered = roi_enabled and not (ignore_roi_if_entry_signal and same_side_entry) and any(
+            time_in_position >= roi_periods[k] and leveraged_bound_return >= roi_vals[k]
+            for k in range(len(roi_vals)))
         max_hold_triggered = time_in_position >= max_hold_period
 
-        # freqtrade's `should_exit`: custom_exit() is only evaluated in the
-        # `else` branch when there's no raw exit-signal this bar, using the
-        # bar's OPEN (`current_rate = rate = row[OPEN_IDX]`) — NOT the
-        # high/low `bound` used above for stoploss/ROI/trailing.
-        custom_exit_triggered, custom_exit_tag = False, None
-        if not signal_exit_triggered and _dp_wired and p.local_trade is not None:
-            current_time_ce = pd.Timestamp(p.dates[i]).tz_localize("UTC")
-            if is_long:
-                ov_ce = amount * base_price * (1.0 + fee_open)
-                cv_ce = amount * open_i * (1.0 - fee) + funding_so_far
-                leveraged_open_return = ((cv_ce / ov_ce) - 1.0) * lev if ov_ce else 0.0
-            else:
-                ov_ce = amount * base_price * (1.0 - fee_open)
-                cv_ce = amount * open_i * (1.0 + fee) - funding_so_far
-                leveraged_open_return = (1.0 - (cv_ce / ov_ce)) * lev if ov_ce else 0.0
-            try:
-                reason_cust = strategy.custom_exit(
-                    pair=pair, trade=p.local_trade, current_time=current_time_ce,
-                    current_rate=open_i, current_profit=leveraged_open_return,
-                )
-            except Exception:
-                logger.debug("strategy.custom_exit(%s) raised", pair, exc_info=True)
-                reason_cust = False
-            if reason_cust:
-                custom_exit_triggered = True
-                custom_exit_tag = reason_cust if isinstance(reason_cust, str) else None
+        if custom_exit_lookahead:
+            # Legacy order: min/max already hold this bar's high/low.
+            custom_exit_triggered, custom_exit_tag = _eval_custom_exit()
 
         # freqtrade's documented priority: Exit-signal (incl. custom_exit),
         # Stoploss, ROI, Trailing stoploss (`should_exit`'s own comment). A
@@ -1398,11 +1560,22 @@ def _joint_multi_pair_backtest(
             candidates.append(("Signal", None, None))
         elif custom_exit_triggered:
             candidates.append(("CustomExit", custom_exit_tag, None))
-        if stop_triggered and not stop_is_trailing:
+        # ROI that needs the price past the trail's arming level (or a trail already armed at the
+        # open) can't come first in the worst case: the trail fires at the first pullback.
+        roi_in_force = roi_vals[0]
+        for k in range(len(roi_vals)):
+            if time_in_position >= roi_periods[k]:
+                roi_in_force = roi_vals[k]
+        roi_preempted = (not intrabar_optimistic and pess_trailing and stop_triggered and stop_is_trailing
+                         and (armed_at_open or roi_in_force > trailing_trigger))
+        if liq_triggered:
+            candidates.append(("Liquidation", None, None))
+        elif stop_triggered and not stop_is_trailing:
             candidates.append(("Stoploss", None, None))
-        if roi_triggered:
+        if roi_triggered and not roi_preempted and \
+                not (time_in_position == 0 and p.fill_intrabar and not fill_bar_roi):
             candidates.append(("RoiTarget", None, None))
-        if stop_triggered and stop_is_trailing:
+        if stop_triggered and stop_is_trailing and not liq_triggered:
             candidates.append(("TrailingStop", None, None))
         if max_hold_triggered:
             candidates.append(("MaxHoldPeriod", None, None))
@@ -1461,7 +1634,8 @@ def _joint_multi_pair_backtest(
             # the ENTRY candle is placed as an ORDER at the pessimistic price;
             # if that price is outside this candle's range the order can't
             # fill, so freqtrade DEFERS the exit to a later bar.
-            if exit_reason == "TrailingStop" and time_in_position == 0:
+            arms_here = pess_trailing and not intrabar_optimistic and not armed_at_open
+            if exit_reason == "TrailingStop" and (time_in_position == 0 or arms_here):
                 # `_get_close_rate_for_stoploss`'s entry-candle worst case. The
                 # offset-anchored formula is only freqtrade's FIRST branch, and
                 # that branch is gated on the pure native-trailing setup; every
@@ -1473,8 +1647,19 @@ def _joint_multi_pair_backtest(
                 if (not use_custom_stoploss and trailing_enabled and trailing_only_offset
                         and trailing_offset_set and trailing_offset):
                     trail_dist = trailing_offset / lev
-                    pess = open_i * (1.0 + abs(trailing_trigger) - abs(trail_dist)) if is_long \
-                        else open_i * (1.0 - abs(trailing_trigger) + abs(trail_dist))
+                    # trailing_stop_positive_offset is a leveraged profit ratio, so the price
+                    # move that arms the trail is offset / leverage (freqtrade divides only the
+                    # trail distance; at 5x a 1.5% offset was booked as a +1.5% price move).
+                    arm = abs(trailing_trigger) if trailing_offset_unlevered else abs(trailing_trigger) / lev
+                    # Entry candle: from its open. A later candle that arms the trail: from the
+                    # entry price, where the arming level sits.
+                    if time_in_position == 0:
+                        pess = open_i * (1.0 + arm - abs(trail_dist)) if is_long \
+                            else open_i * (1.0 - arm + abs(trail_dist))
+                    elif is_long:  # an open gapped past the arming level arms right there
+                        pess = max(base_price * (1.0 + arm), open_i) * (1.0 - abs(trail_dist))
+                    else:
+                        pess = min(base_price * (1.0 - arm), open_i) * (1.0 + abs(trail_dist))
                 else:
                     pess = open_i * (1.0 - abs(stop_loss_dist)) if is_long \
                         else open_i * (1.0 + abs(stop_loss_dist))
@@ -1485,6 +1670,12 @@ def _joint_multi_pair_backtest(
                 # candle. This still remains worst case - but worst REALISTIC
                 # case."
                 base_exit_price = max(pess, low_i) if is_long else min(pess, high_i)
+            elif exit_reason == "Liquidation":
+                # Same rule as a stop (`_get_close_rate_for_stoploss` with the liquidation price).
+                if is_long:
+                    base_exit_price = open_i if liq > high_i else liq
+                else:
+                    base_exit_price = open_i if liq < low_i else liq
             elif exit_reason in ("TrailingStop", "Stoploss"):
                 # freqtrade's `_get_close_rate_for_stoploss`: if the ratcheted
                 # stop sits entirely outside this candle's range (never
@@ -1495,14 +1686,12 @@ def _joint_multi_pair_backtest(
                 else:
                     base_exit_price = open_i if stop_loss_price < low_i else stop_loss_price
             elif exit_reason == "RoiTarget":
-                if time_in_position >= roi_periods[3] and leveraged_bound_return >= roi_vals[3]:
-                    roi_pct, roi_entry_period = roi_vals[3] / lev, roi_periods[3]
-                elif time_in_position >= roi_periods[2] and leveraged_bound_return >= roi_vals[2]:
-                    roi_pct, roi_entry_period = roi_vals[2] / lev, roi_periods[2]
-                elif time_in_position >= roi_periods[1] and leveraged_bound_return >= roi_vals[1]:
-                    roi_pct, roi_entry_period = roi_vals[1] / lev, roi_periods[1]
-                else:
-                    roi_pct, roi_entry_period = roi_vals[0] / lev, roi_periods[0]
+                # the latest tier whose period has started and whose target this bar reached
+                roi_pct, roi_entry_period = roi_vals[0] / lev, roi_periods[0]
+                for k in range(len(roi_vals) - 1, 0, -1):
+                    if time_in_position >= roi_periods[k] and leveraged_bound_return >= roi_vals[k]:
+                        roi_pct, roi_entry_period = roi_vals[k] / lev, roi_periods[k]
+                        break
                 # Mirror freqtrade's `_get_close_rate_for_roi` fee-consistent
                 # solve rather than a naive `base_price * (1 +/- roi_pct)`.
                 side_1 = 1.0 if is_long else -1.0
@@ -1614,8 +1803,9 @@ def _joint_multi_pair_backtest(
                                fee_close=fill_fee(base_exit_price, open_i, not is_long))
                 return True
 
-            if not _confirm_exit(pair, p.local_trade, current_time_exit, amount, base_exit_price, reason_tag):
-                continue  # vetoed -> try the next candidate this same bar
+            if exit_reason != "Liquidation" and \
+                    not _confirm_exit(pair, p.local_trade, current_time_exit, amount, base_exit_price, reason_tag):
+                continue  # vetoed -> try the next candidate this same bar (a liquidation can't be)
 
             close_position(pair, p, i, base_exit_price, exit_reason, reason_tag,
                            current_time_exit, funding_so_far, fee_close=fee)
@@ -1679,6 +1869,14 @@ def _joint_multi_pair_backtest(
             "profit_ratio": leveraged_profit, "profit_abs": pnl_amount,
             "leverage": lev, "exit_reason": exit_reason, "exit_reason_tag": reason_tag, "stake": stake,
             "funding_fees": funding_fees,
+            # adjust_min_max_rates() above has already tracked the REAL bar-by-bar
+            # high/low over the trade's life - export it instead of letting
+            # _multi_pair_backtest_rust's row-builder fall back to
+            # min/max(open_rate, close_rate), which silently zeroes MAE for every
+            # winner and MFE for every loser (the side that never got touched by
+            # the realized exit price).
+            "max_rate": p.local_trade.max_rate if p.local_trade is not None else None,
+            "min_rate": p.local_trade.min_rate if p.local_trade is not None else None,
         })
 
         p.in_position = False
@@ -1746,7 +1944,13 @@ def _joint_multi_pair_backtest(
         if p.in_position:
             do_exit_check(pair, p, i)
 
-        return exiting_dir_before
+        # freqtrade's backtest_loop returns the exiting direction only when this pass CLOSED the
+        # position, so the second pass exists for a same-candle reversal. Returning it for a
+        # position still open re-ran every exit check on the same bar (custom_exit then saw the
+        # bar's high/low through min/max). Legacy order keeps the old double pass.
+        if custom_exit_lookahead or not p.in_position:
+            return exiting_dir_before
+        return None
 
     last_ts = all_dates[-1] if len(all_dates) else None
     for ts in all_dates:
@@ -1855,6 +2059,8 @@ def _joint_multi_pair_backtest(
             "profit_ratio": leveraged_profit, "profit_abs": pnl_amount,
             "leverage": p.trade_leverage, "exit_reason": "ForceExit", "exit_reason_tag": "force_exit", "stake": stake,
             "funding_fees": funding_fees,
+            "max_rate": p.local_trade.max_rate if p.local_trade is not None else None,
+            "min_rate": p.local_trade.min_rate if p.local_trade is not None else None,
         })
 
         if p.local_trade is not None:
@@ -1890,6 +2096,375 @@ def _joint_multi_pair_backtest(
         "replaced_entry_orders": replaced_entry_orders,
         "replaced_exit_orders": replaced_exit_orders,
     }
+
+
+# =============================================================================
+# NATIVE MULTI-PAIR ENGINE — fast path for the common case
+# =============================================================================
+#
+# `_joint_multi_pair_backtest` above invokes up to 13 freqtrade-style Python
+# strategy callbacks per trade/per bar, and profiling showed it at 27% of a
+# real backtest's wall time (`do_exit_check`/`funding_fee_for` each called
+# 33,222 times — `funding_fee_for` dominated by `pd.Timestamp` construction
+# overhead, not the O(log n) lookup itself).
+#
+# `vulcan_rust_indicators.multi_pair_backtest` (see backtester/src/
+# multi_pair.rs) is a native Rust port of the SAME state machine, calling back
+# into real Python for `leverage`/`custom_stake_amount`/`confirm_trade_entry`/
+# `custom_entry_price` (entry-time — see `_ENTRY_TIME_HOOKS`) and
+# `custom_stoploss`/`custom_exit` (per-bar, need a live `LocalTrade` — see
+# `_PER_BAR_HOOKS`) for whichever a given strategy actually overrides,
+# degrading to the unoverridden `IStrategy` base behavior (verified by reading
+# each base method's actual body, not assumed — see multi_pair.rs's module doc
+# comment for the full trace) for the rest. `custom_exit_price`/
+# `confirm_trade_exit`/`custom_sell` are NOT bridged (see `_UNBRIDGED_HOOKS`'s
+# doc comment for why `custom_sell` specifically is more than "not implemented
+# yet") — overriding any of those still falls back to Python entirely.
+#
+# `_is_eligible_for_rust_multi_pair_engine` below verifies ALL of those
+# preconditions hold for a given strategy/run before `run_rust_backtest`
+# dispatches here; when any of them don't, it falls back to the original,
+# completely untouched `_joint_multi_pair_backtest`. This makes the new path
+# strictly additive — nothing about existing behavior changes for any
+# strategy/config combination the new engine doesn't yet cover.
+
+# The four entry-time hooks the Rust engine's `PyStrategyCallbacks` (Phase 2
+# of the callback bridge) actually calls into Python for when overridden —
+# see `multi_pair.rs`'s `StrategyCallbacks` trait and `python.rs`'s
+# `PyStrategyCallbacks`. Called once per candidate entry, not once per bar.
+_ENTRY_TIME_HOOKS = ("leverage", "custom_stake_amount", "confirm_trade_entry", "custom_entry_price")
+
+# The two per-bar/per-exit hooks Phase 3/5 bridge — `custom_stoploss` isn't a
+# plain override check (freqtrade only calls it at all when the strategy sets
+# `use_custom_stoploss = True`, checked separately), so it's not in this
+# tuple; `_multi_pair_backtest_rust` reads that flag directly.
+# `confirm_trade_exit` is called once per exit CANDIDATE (not once per bar),
+# same cost profile as the entry-time hooks — bridged 2026-09-27 after a fleet
+# eligibility scan against the REAL deployed strategy classes (not
+# `find_primary_strategies`'s internal `_XyzChampionBase` picks, which
+# under-count real exclusions — see project memory) found 64/160 deployed
+# strategies (40%) blocked by this ONE hook alone, all via the same
+# `ChampionPositionSizerMixin.confirm_trade_exit` (updates its equity-curve
+# sizer state, then delegates to `super()` — no resting-order/Order object
+# needed, unlike the still-unbridged `custom_exit_price`).
+_PER_BAR_HOOKS = ("custom_exit", "confirm_trade_exit")
+
+# Hooks the engine does NOT bridge, ever, and the eligibility gate always
+# routes to `_joint_multi_pair_backtest` for: `custom_exit_price` needs the
+# resting-order/Order-notification apparatus this native engine doesn't model
+# (see the module doc comment above `_multi_pair_backtest_rust`). `custom_sell`
+# is the pre-3.0 freqtrade name — IStrategy's own `custom_exit()` base
+# implementation falls through to `self.custom_sell(...)` when NOT overridden
+# (see `interface.py`), so a strategy overriding only `custom_sell` would look
+# like "custom_exit not overridden" to a naive per-hook check and silently
+# skip real exit logic; excluding it here is what makes the `has_custom_exit`
+# check below safe.
+_UNBRIDGED_HOOKS = ("custom_exit_price", "custom_sell")
+
+
+def _hook_override_flags(strategy: Any, hooks: tuple[str, ...]) -> dict[str, bool]:
+    """Per-hook `getattr(cls, name) is not IStrategy.<name>` checks — unlike a
+    single combined boolean, this tells the Rust bridge exactly WHICH hooks to
+    actually call into Python for, so a strategy overriding only e.g.
+    `leverage()` doesn't pay the Python-call cost for the other three."""
+    from VulcanTrader.strategy.interface import IStrategy
+
+    cls = type(strategy)
+    flags = {}
+    for name in hooks:
+        base_fn = getattr(IStrategy, name, None)
+        strat_fn = getattr(cls, name, None)
+        flags[name] = base_fn is not None and strat_fn is not base_fn
+    return flags
+
+
+def _exchange_may_report_market_expiry(exchange: Any) -> bool:
+    """`market.get("expiry")` is populated ONLY by
+    VulcanTrader/exchange/polymarket.py — every other exchange in this repo
+    leaves it unset, making confirm_trade_entry()/custom_exit()'s market-
+    expiry branch provably dead. Detected structurally (module name) rather
+    than an exchange allowlist, so a new exchange module defaults to the
+    SAFE answer (assume it might report expiry -> fall back to Python) unless
+    it's explicitly the one module known to populate it.
+    """
+    if exchange is None:
+        return False
+    module = type(exchange).__module__ or ""
+    return "polymarket" in module.lower()
+
+
+def _is_eligible_for_rust_multi_pair_engine(strategy: Any, eng: dict, exchange: Any) -> bool:
+    if eng.get("entry_limit_offset", 0.0) > 0.0 or eng.get("exit_limit_offset", 0.0) > 0.0:
+        return False  # resting-order simulation not implemented natively
+    if (getattr(strategy, "order_types", {}) or {}).get("entry", "limit") == "limit" and \
+            _hook_override_flags(strategy, ("custom_entry_price",))["custom_entry_price"]:
+        # A strategy can rest a limit through custom_entry_price alone, with no config offset.
+        # The native engine takes that price but fills it on the placement bar whether or not
+        # the market ever trades there (VolML limit_fade: a buy 5% under the open "filled"
+        # every bar and sold at the open, 2.3M trades at 100% win rate).
+        return False
+    if getattr(strategy, "market_end_buffer_minutes", 60) >= 0 and _exchange_may_report_market_expiry(exchange):
+        # confirm_trade_entry()'s hardcoded-True fallback and custom_exit()'s
+        # hardcoded-None fallback — BOTH used only when the respective hook is
+        # NOT overridden (an override runs for real via the bridge regardless
+        # of this branch) — are only correct because this is provably dead
+        # outside Polymarket.
+        return False
+    # The four entry-time hooks (leverage/custom_stake_amount/
+    # confirm_trade_entry/custom_entry_price) and `custom_exit`/
+    # `confirm_trade_exit`/`use_custom_stoploss` (see `_PER_BAR_HOOKS` and
+    # `_multi_pair_backtest_rust`'s `needs_trade_bridge`) are bridged, so
+    # overriding any of THOSE no longer disqualifies a strategy. Anything else
+    # still does.
+    if any(_hook_override_flags(strategy, _UNBRIDGED_HOOKS).values()):
+        return False
+    if exchange is not None:
+        # `truncate_amount` (multi_pair.rs) only implements ccxt's TICK_SIZE +
+        # TRUNCATE lot-size rounding — traced exactly against
+        # ccxt.base.decimal_to_precision and confirmed Hyperliquid (this
+        # repo's primary exchange) uses it. An exchange using DECIMAL_PLACES
+        # (e.g. bitunix/drift) would silently get the WRONG amount rounding
+        # if routed here, so fall back to Python instead of guessing.
+        try:
+            from ccxt import TICK_SIZE
+            if exchange.precisionMode != TICK_SIZE:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _build_multi_pair_rust_inputs(
+    processed: dict[str, pd.DataFrame], config: dict, exchange: Any,
+    can_short: bool, is_futures: bool,
+) -> tuple[list[dict], dict[str, np.ndarray]]:
+    """Per-pair arrays for `vri.multi_pair_backtest`, built with the exact
+    same helpers `_joint_multi_pair_backtest` uses for its own `_PairState`
+    (`_f64`/`_u8`/`_shift1`/`_precision_per_bar`/`_pair_exchange_max_leverage`/
+    `_load_funding_mark_data`) so the two engines start from identical inputs.
+
+    Returns `(pairs_for_rust, dates_by_pair)` — `dates_by_pair` is the naive
+    `datetime64[ns]` array per pair, needed afterward to attach `t["_dates"]`
+    to each returned trade exactly like `_joint_multi_pair_backtest`'s caller
+    already does.
+    """
+    fallback_max_leverage = float(config.get("rust_leverage_max", 10.0))
+    pairs: list[dict] = []
+    dates_by_pair: dict[str, np.ndarray] = {}
+
+    funding_mark: dict[str, pd.DataFrame] = {}
+    if is_futures and exchange is not None:
+        try:
+            funding_mark = _load_funding_mark_data(config, exchange, list(processed.keys()))
+        except Exception:
+            logger.exception("Failed to load funding/mark data for the Rust multi-pair engine")
+
+    for pair, df in processed.items():
+        if df is None or df.empty:
+            continue
+        n = len(df)
+        dates = pd.to_datetime(df["date"]).to_numpy(dtype="datetime64[ns]")
+        dates_by_pair[pair] = dates
+
+        precision = _precision_per_bar(df, dates, exchange, pair)
+        exch_max_lev = _pair_exchange_max_leverage(exchange, pair, 0.0, fallback_max_leverage)
+
+        # Lot-size rounding for the entry AMOUNT (not price) — freqtrade's
+        # `_enter_trade` rounds the position size to this and back-calculates
+        # the real stake from the rounded amount (see multi_pair.rs's
+        # `truncate_amount` doc comment for why this isn't cosmetic: it's a
+        # real, per-trade wallet-balance drift on coarse lot sizes). `NaN`
+        # here means "no exchange / no precision data -> don't round",
+        # matching `do_enter`'s own `if exchange is not None:` guard.
+        amount_precision = float("nan")
+        contract_size = 1.0
+        if exchange is not None:
+            try:
+                amt_prec = exchange.get_precision_amount(pair)
+                if amt_prec is not None:
+                    amount_precision = float(amt_prec)
+            except Exception:
+                logger.debug("exchange.get_precision_amount(%s) failed", pair, exc_info=True)
+            try:
+                cs = exchange.get_contract_size(pair)
+                if cs:
+                    contract_size = float(cs)
+            except Exception:
+                logger.debug("exchange.get_contract_size(%s) failed", pair, exc_info=True)
+
+        # CME-style flat $/contract commission (Futuressim/Rithmic/Ninjatrader only;
+        # 0.0 = "no override", every other exchange's fill_fee is unaffected). The
+        # native engine re-divides by its OWN fill price per trade - see multi_pair.rs's
+        # fill_fee, which is why this is the raw $ figure and not get_futures_fee_pct's
+        # already-converted percentage.
+        fee_per_contract = 0.0
+        if exchange is not None:
+            try:
+                get_fpc = getattr(exchange, "get_fee_per_contract", None)
+                if get_fpc is not None:
+                    fpc = get_fpc(pair)
+                    if fpc:
+                        fee_per_contract = float(fpc)
+            except Exception:
+                logger.debug("exchange.get_fee_per_contract(%s) failed", pair, exc_info=True)
+
+        fmark = funding_mark.get(pair)
+        funding_dates_ns = np.empty(0, dtype=np.int64)
+        funding_cumsum = np.empty(0, dtype=np.float64)
+        if fmark is not None and not fmark.empty:
+            funding_dates_ns = pd.to_datetime(fmark["date"]).to_numpy(dtype="datetime64[ns]").astype(np.int64)
+            vals = (fmark["open_fund"].to_numpy(dtype=np.float64)
+                    * fmark["open_mark"].to_numpy(dtype=np.float64))
+            funding_cumsum = np.concatenate(([0.0], np.cumsum(vals)))
+
+        pairs.append({
+            "pair": pair,
+            "dates_ns": dates.astype(np.int64),
+            "open": _f64(df["open"], n),
+            "high": _f64(df["high"], n),
+            "low": _f64(df["low"], n),
+            "enter_long": _shift1(_u8(df.get("enter_long"), n)),
+            "exit_long": _shift1(_u8(df.get("exit_long"), n)),
+            "enter_short": _shift1(_u8(df.get("enter_short"), n)) if can_short else np.zeros(n, dtype=np.uint8),
+            "exit_short": _shift1(_u8(df.get("exit_short"), n)) if can_short else np.zeros(n, dtype=np.uint8),
+            "precision": np.asarray(precision, dtype=np.float64),
+            "exchange_max_leverage": exch_max_lev,
+            "amount_precision": amount_precision,
+            "contract_size": contract_size,
+            "fee_per_contract": fee_per_contract,
+            "funding_dates_ns": funding_dates_ns,
+            "funding_cumsum": funding_cumsum,
+        })
+
+    return pairs, dates_by_pair
+
+
+def _multi_pair_backtest_rust(
+    processed: dict[str, pd.DataFrame], strategy: Any, config: dict, exchange: Any = None,
+    full_signals: dict[str, pd.DataFrame] | None = None,
+    required_startup: int = 0,
+    dataprovider: Any = None,
+) -> tuple[list[dict], int, dict]:
+    """Native-engine dispatch target — same signature and return shape as
+    `_joint_multi_pair_backtest`, so `run_rust_backtest` can call either one
+    interchangeably.
+
+    `full_signals`/`required_startup`/`dataprovider` matter only for
+    strategies that need Phase 3's per-bar bridge (`use_custom_stoploss` or a
+    real `custom_exit()` override — `needs_trade_bridge` below): `_set_cached_
+    df` is seeded per pair here, once, exactly like `_joint_multi_pair_
+    backtest` does before its own loop starts, since only Python has the full
+    analyzed DataFrame (the Rust side only ever sees the raw numpy arrays
+    `_build_multi_pair_rust_inputs` extracts). The per-bar `_set_dataframe_
+    max_index` cursor update happens inside the Rust loop itself (`python.rs`'s
+    `PyStrategyCallbacks::set_bar_cursor`), which is why `required_startup`
+    is threaded through as a plain int rather than applied here.
+    """
+    import json
+    import vulcan_rust_indicators as vri
+
+    eng = _build_engine_config(strategy, config)
+    can_short = bool(getattr(strategy, "can_short", False)) and \
+        str(config.get("trading_mode", "futures")) != "spot"
+    is_futures = str(config.get("trading_mode", "futures")) != "spot"
+
+    # Same resolution `_joint_multi_pair_backtest` uses for these two —
+    # IStrategy's own default `order_types` is "limit" for entry, NOT
+    # "market" (see that function's docstring), and `confirm_trade_entry()`
+    # (when overridden) receives whichever of these the strategy actually
+    # configured, not a hardcoded default.
+    _order_types = getattr(strategy, "order_types", {}) or {}
+    _tif = getattr(strategy, "order_time_in_force", {}) or {}
+    entry_order_type = _order_types.get("entry", "limit")
+    entry_tif = _tif.get("entry", "GTC")
+    # Same resolution for the exit side — forwarded to confirm_trade_exit()
+    # exactly as `_joint_multi_pair_backtest`'s own `_confirm_exit` does.
+    exit_order_type = _order_types.get("exit", "limit")
+    exit_tif = _tif.get("exit", "GTC")
+
+    hook_flags = _hook_override_flags(strategy, _ENTRY_TIME_HOOKS)
+    per_bar_flags = _hook_override_flags(strategy, _PER_BAR_HOOKS)
+    use_custom_stoploss = bool(getattr(strategy, "use_custom_stoploss", False))
+    needs_trade_bridge = use_custom_stoploss or per_bar_flags["custom_exit"] or per_bar_flags["confirm_trade_exit"]
+
+    pairs, dates_by_pair = _build_multi_pair_rust_inputs(processed, config, exchange, can_short, is_futures)
+    if not pairs:
+        return [], 0, {}
+
+    dp_for_rust = None
+    if needs_trade_bridge and dataprovider is not None and full_signals is not None:
+        # Mirrors `_joint_multi_pair_backtest`'s own `_set_cached_df` setup
+        # (once per pair, before the loop starts) — so `self.dp.
+        # get_analyzed_dataframe(pair, timeframe)` inside custom_stoploss()/
+        # custom_exit() returns real, causally-correct data instead of
+        # empty/stale results.
+        from VulcanTrader.enums import CandleType
+        _candle_type = config.get("candle_type_def", CandleType.SPOT)
+        _tf = eng["timeframe"]
+        for _pair, _full_df in full_signals.items():
+            try:
+                dataprovider._set_cached_df(_pair, _tf, _full_df, _candle_type)
+            except Exception:
+                logger.debug("DataProvider._set_cached_df(%s) failed", _pair, exc_info=True)
+        dp_for_rust = dataprovider
+
+    config_json = json.dumps({
+        "can_short": can_short,
+        "max_open_trades": int(config.get("max_open_trades", 0) or 0),
+        "fee_taker": eng["fee_taker"],
+        "fee_maker": eng["fee_maker"],
+        "base_stoploss": eng["base_stoploss"],
+        "trailing_enabled": eng["trailing_enabled"],
+        "trailing_trigger": eng["trailing_trigger"],
+        "trailing_offset": eng["trailing_offset"],
+        "trailing_offset_set": eng["trailing_offset_set"],
+        "trailing_only_offset": eng["trailing_only_offset"],
+        "custom_exit_lookahead": eng["custom_exit_lookahead"],
+        "trailing_offset_unlevered": eng["trailing_offset_unlevered"],
+        "liquidation_enabled": eng["liquidation_enabled"],
+        "liquidation_buffer": eng["liquidation_buffer"],
+        "intrabar_optimistic": eng["intrabar_optimistic"],
+        "use_exit_signal": eng["use_exit_signal"],
+        "exit_profit_only": eng["exit_profit_only"],
+        "exit_profit_offset": eng["exit_profit_offset"],
+        "ignore_roi_if_entry_signal": eng["ignore_roi_if_entry_signal"],
+        "exit_settings_ignored": eng["exit_settings_ignored"],
+        "roi_enabled": eng["roi_enabled"],
+        "roi_vals": eng["roi_vals"],
+        "roi_periods": eng["roi_periods"],
+        "max_hold_period": eng["max_hold_period"],
+        "is_futures": is_futures,
+        "use_custom_stoploss": use_custom_stoploss,
+        "compounding": eng["compounding_enabled"],
+        "starting_balance": eng["starting_balance"],
+        "tradable_ratio": eng["tradable_balance_ratio"],
+        "max_trade_amount": eng["max_trade_amount"],
+    })
+
+    result = json.loads(vri.multi_pair_backtest(
+        pairs, config_json, strategy,
+        hook_flags["leverage"], hook_flags["custom_stake_amount"],
+        hook_flags["confirm_trade_entry"], hook_flags["custom_entry_price"],
+        per_bar_flags["custom_exit"], per_bar_flags["confirm_trade_exit"],
+        entry_order_type, entry_tif, exit_order_type, exit_tif,
+        dp_for_rust, int(required_startup), eng["fee_taker"],
+    ))
+    trades: list[dict] = result["trades"]
+    bars_by_pair = {p["pair"]: p for p in pairs}
+    for t in trades:
+        t["_dates"] = dates_by_pair[t["pair"]]
+        # `TradeOut` carries no max_rate/min_rate, so rebuild them from the
+        # same bars `do_exit_check` fed `adjust_min_max_rates` (entry bar
+        # through exit bar, seeded with the raw open rate) — otherwise
+        # run_rust_backtest's row-builder falls back to min/max(open_rate,
+        # close_rate), which zeroes MAE for every winner and MFE for every
+        # loser and degenerates AdaptiveMAEMFE calibrations to 0.0 cuts.
+        bars = bars_by_pair[t["pair"]]
+        ei, xi = int(t["entry_row"]), int(t["exit_row"])
+        open_rate = t.get("base_entry_price") or t["entry_price"]
+        t["max_rate"] = max(open_rate, float(np.nanmax(bars["high"][ei:xi + 1])))
+        t["min_rate"] = min(open_rate, float(np.nanmin(bars["low"][ei:xi + 1])))
+    return trades, int(result["rejected"]), {}
 
 
 def run_rust_backtest(processed: dict[str, pd.DataFrame], strategy: Any,
@@ -1934,15 +2509,40 @@ def run_rust_backtest(processed: dict[str, pd.DataFrame], strategy: Any,
         getattr(strategy, "timeframe", None) or config.get("timeframe", "15m"))
     stoploss_ratio = float(getattr(strategy, "stoploss", -0.10) or -0.10)
 
+    # Route through the native multi-pair engine when it's provably safe to
+    # (see `_is_eligible_for_rust_multi_pair_engine` / the module doc comment
+    # above `_multi_pair_backtest_rust`); otherwise fall back to the original,
+    # untouched `_joint_multi_pair_backtest` — nothing about that path changes.
+    eng_for_gate = _build_engine_config(strategy, config)
+    use_native_engine = _is_eligible_for_rust_multi_pair_engine(strategy, eng_for_gate, exchange)
+    import os
+    if os.environ.get("VULCAN_FORCE_PY_MULTI_PAIR"):
+        use_native_engine = False
+    engine_fn = _multi_pair_backtest_rust if use_native_engine else _joint_multi_pair_backtest
+
     try:
-        raw_trades, rejected, order_stats = _joint_multi_pair_backtest(
+        raw_trades, rejected, order_stats = engine_fn(
             processed, strategy, config, exchange,
             full_signals=full_signals, required_startup=required_startup,
             dataprovider=dataprovider,
         )
     except Exception:
-        logger.exception("Rust-engine joint backtest failed")
-        raw_trades, rejected, order_stats = [], 0, {}
+        if use_native_engine:
+            # Never let a native-engine bug silently look like "no trades" —
+            # fall back to the proven Python path and keep going.
+            logger.exception("Native Rust multi-pair engine failed; falling back to the Python engine")
+            try:
+                raw_trades, rejected, order_stats = _joint_multi_pair_backtest(
+                    processed, strategy, config, exchange,
+                    full_signals=full_signals, required_startup=required_startup,
+                    dataprovider=dataprovider,
+                )
+            except Exception:
+                logger.exception("Rust-engine joint backtest failed")
+                raw_trades, rejected, order_stats = [], 0, {}
+        else:
+            logger.exception("Rust-engine joint backtest failed")
+            raw_trades, rejected, order_stats = [], 0, {}
 
     rows: list[dict] = []
     for t in raw_trades:
@@ -1990,8 +2590,8 @@ def run_rust_backtest(processed: dict[str, pd.DataFrame], strategy: Any,
             "initial_stop_loss_ratio": stoploss_ratio,
             "stop_loss_abs": 0.0,
             "stop_loss_ratio": stoploss_ratio,
-            "min_rate": min(open_rate, close_rate),
-            "max_rate": max(open_rate, close_rate),
+            "min_rate": t.get("min_rate") if t.get("min_rate") is not None else min(open_rate, close_rate),
+            "max_rate": t.get("max_rate") if t.get("max_rate") is not None else max(open_rate, close_rate),
             "is_open": False,
             "enter_tag": None,
             "leverage": leverage,

@@ -632,9 +632,16 @@ class Backtesting:
                 and self.strategy.trailing_stop_positive
             ):
                 # Worst case: price reaches stop_positive_offset and dives down.
+                # The offset is a leveraged profit ratio, so the price move that arms the trail
+                # is offset / leverage (freqtrade divides only the trail distance; at 5x a 1.5%
+                # offset was booked as a +1.5% price move). `backtest_legacy:
+                # {"trailing_offset_unlevered": true}` restores the old price.
+                arm = abs(self.strategy.trailing_stop_positive_offset)
+                if not (self.config.get("backtest_legacy") or {}).get("trailing_offset_unlevered"):
+                    arm = arm / leverage
                 stop_rate = row[OPEN_IDX] * (
                     1
-                    + side_1 * abs(self.strategy.trailing_stop_positive_offset)
+                    + side_1 * arm
                     - side_1 * abs(self.strategy.trailing_stop_positive / leverage)
                 )
             else:

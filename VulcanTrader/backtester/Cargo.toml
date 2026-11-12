@@ -29,3 +29,12 @@ python = ["dep:pyo3", "dep:numpy"]
 # What maturin builds with: the bridge plus PyO3's extension-module mode (don't
 # link libpython). Kept OFF for `cargo test`, which links a real interpreter.
 extension-module = ["python", "pyo3/extension-module"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# NOT "abort": this crate is loaded live inside bot processes as the
+# vulcan_rust_indicators PyO3 extension, and PyO3 needs unwinding to catch a
+# panic at the FFI boundary and surface it as a Python exception instead of
+# hard-crashing the process.

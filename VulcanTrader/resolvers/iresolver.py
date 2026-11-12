@@ -9,6 +9,7 @@ import inspect
 import logging
 import sys
 import threading
+import types
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,34 @@ from VulcanTrader.util.exceptions import OperationalException
 
 
 logger = logging.getLogger(__name__)
+
+
+def _install_freqtrade_compat_shim() -> None:
+    """
+    This fork renamed the `freqtrade` package to `VulcanTrader` and does not
+    install a `freqtrade` package at all, but some third-party strategy
+    dependencies (e.g. the `technical` pip package's pivots_points module)
+    still do `import freqtrade.vendor.qtpylib.indicators` under the
+    upstream name. Alias that import path to this fork's own vendor copy so
+    those strategies load instead of raising ModuleNotFoundError.
+    """
+    if "freqtrade" in sys.modules:
+        return
+    import VulcanTrader.vendor.qtpylib.indicators as _qtpylib
+
+    freqtrade_pkg = types.ModuleType("freqtrade")
+    vendor_pkg = types.ModuleType("freqtrade.vendor")
+    qtpylib_pkg = types.ModuleType("freqtrade.vendor.qtpylib")
+    freqtrade_pkg.vendor = vendor_pkg
+    vendor_pkg.qtpylib = qtpylib_pkg
+    qtpylib_pkg.indicators = _qtpylib
+    sys.modules["freqtrade"] = freqtrade_pkg
+    sys.modules["freqtrade.vendor"] = vendor_pkg
+    sys.modules["freqtrade.vendor.qtpylib"] = qtpylib_pkg
+    sys.modules["freqtrade.vendor.qtpylib.indicators"] = _qtpylib
+
+
+_install_freqtrade_compat_shim()
 
 # Process-wide cache of the filtered candidate .py file list per directory,
 # keyed by resolved directory path. Under single_process_mode, every bot in
@@ -34,15 +63,17 @@ _candidate_files_cache: dict[Path, list[Path]] = {}
 _candidate_files_lock = threading.Lock()
 
 
-def _cached_candidate_files(directory: Path) -> list[Path]:
+def _cached_candidate_files(directory: Path, *, force_refresh: bool = False) -> list[Path]:
     resolved = directory.resolve()
-    cached = _candidate_files_cache.get(resolved)
-    if cached is not None:
-        return cached
-    with _candidate_files_lock:
+    if not force_refresh:
         cached = _candidate_files_cache.get(resolved)
         if cached is not None:
             return cached
+    with _candidate_files_lock:
+        if not force_refresh:
+            cached = _candidate_files_cache.get(resolved)
+            if cached is not None:
+                return cached
         candidates = []
         for entry in sorted(directory.rglob("*.py")):
             rel_parts = entry.relative_to(directory).parts
@@ -183,17 +214,28 @@ class IResolver:
         # itself (walk + sort + hidden/dunder/non-file filtering) is cached
         # process-wide - see _cached_candidate_files - since it's the same
         # regardless of which object_name this particular call is after.
-        for entry in _cached_candidate_files(directory):
-            module_path = entry.resolve()
-            if entry.read_text(encoding="utf-8").find(f"class {object_name}(") == -1:
-                logger.debug(f"Skipping {module_path} as it does not contain class {object_name}.")
-                continue
+        #
+        # A miss on the cached listing is retried once against a freshly
+        # rebuilt one: under single_process_mode this directory is scanned
+        # once and kept for the life of the process, but a file can be
+        # added/renamed on disk after that first scan (a new strategy
+        # dropped in while the fleet-control process keeps running) - without
+        # this, a perfectly valid strategy added later raises "does not
+        # exist" forever until the process restarts.
+        for force_refresh in (False, True):
+            for entry in _cached_candidate_files(directory, force_refresh=force_refresh):
+                module_path = entry.resolve()
+                if entry.read_text(encoding="utf-8").find(f"class {object_name}(") == -1:
+                    logger.debug(
+                        f"Skipping {module_path} as it does not contain class {object_name}."
+                    )
+                    continue
 
-            if obj := next(cls._get_valid_object(module_path, object_name), None):
-                obj[0].__file__ = str(entry)
-                if add_source:
-                    obj[0].__source__ = obj[1]
-                return (obj[0], module_path)
+                if obj := next(cls._get_valid_object(module_path, object_name), None):
+                    obj[0].__file__ = str(entry)
+                    if add_source:
+                        obj[0].__source__ = obj[1]
+                    return (obj[0], module_path)
         return (None, None)
 
     @classmethod

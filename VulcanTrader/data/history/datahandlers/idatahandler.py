@@ -5,8 +5,12 @@ It's subclasses handle and storing data from disk.
 """
 
 import logging
+import os
 import re
+import threading
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -126,7 +130,12 @@ class IDataHandler(ABC):
 
     @abstractmethod
     def _ohlcv_load(
-        self, pair: str, timeframe: str, timerange: TimeRange | None, candle_type: CandleType
+        self,
+        pair: str,
+        timeframe: str,
+        timerange: TimeRange | None,
+        candle_type: CandleType,
+        raise_on_error: bool = False,
     ) -> DataFrame:
         """
         Internal method used to load data for one pair from disk.
@@ -138,6 +147,8 @@ class IDataHandler(ABC):
                         Optionally implemented by subclasses to avoid loading
                         all data where possible.
         :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :param raise_on_error: Raise if the file exists but can't be read, instead of
+                        returning an empty DataFrame (see `ohlcv_load`)
         :return: DataFrame with ohlcv data, or empty DataFrame
         """
 
@@ -312,6 +323,34 @@ class IDataHandler(ABC):
         if not datadir.parent.is_dir():
             datadir.parent.mkdir()
 
+    @staticmethod
+    def _write_atomically(filename: Path, write: Callable[[Path], None]) -> None:
+        """
+        Write through a sibling temp file, then swap it in.
+        Writing straight to `filename` truncates it first, so a concurrent reader (data
+        server, bot, backtest) could load a half-written file. Loaders treat an unreadable
+        file as empty, and a writer that then stores what it holds replaces the whole
+        history with its newest candles.
+        """
+        tmp = filename.with_name(f"{filename.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+        try:
+            write(tmp)
+            # Windows refuses to replace a file another handle has open; readers hold
+            # it only briefly, so retry for up to ~2s.
+            delay = 0.01
+            for attempt in range(12):
+                try:
+                    os.replace(tmp, filename)
+                    break
+                except PermissionError:
+                    if attempt == 11:
+                        raise
+                    time.sleep(delay)
+                    delay = min(delay * 2, 0.25)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
     @classmethod
     def _pair_data_filename(
         cls,
@@ -375,6 +414,7 @@ class IDataHandler(ABC):
         drop_incomplete: bool = False,
         startup_candles: int = 0,
         warn_no_data: bool = True,
+        raise_on_error: bool = False,
     ) -> DataFrame:
         """
         Load cached candle (OHLCV) data for the given pair.
@@ -387,6 +427,10 @@ class IDataHandler(ABC):
         :param startup_candles: Additional candles to load at the start of the period
         :param warn_no_data: Log a warning message when no data is found
         :param candle_type: Any of the enum CandleType (must match trading mode!)
+        :param raise_on_error: Raise if the file exists but can't be read. By default that
+                        returns an empty DataFrame, the same as no file at all - fine for
+                        readers, but a writer that merges into it and stores the result
+                        replaces the file's whole history.
         :return: DataFrame with ohlcv data, or empty DataFrame
         """
         # Fix startup period
@@ -395,7 +439,11 @@ class IDataHandler(ABC):
             timerange_startup.subtract_start(timeframe_to_seconds(timeframe) * startup_candles)
 
         pairdf = self._ohlcv_load(
-            pair, timeframe, timerange=timerange_startup, candle_type=candle_type
+            pair,
+            timeframe,
+            timerange=timerange_startup,
+            candle_type=candle_type,
+            raise_on_error=raise_on_error,
         )
         if not pairdf.empty and candle_type == CandleType.FUNDING_RATE:
             # Funding rate data is sometimes off by a couple of ms - floor to seconds

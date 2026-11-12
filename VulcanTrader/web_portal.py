@@ -216,6 +216,13 @@ class BacktestRunRequest(BaseModel):
     engine: str | None = "python"
 
 
+class FragilityRunRequest(BaseModel):
+    backtest: str
+    config: str | None = None
+    refresh: bool = False
+    detail: bool = False   # python engine + 1m candles inside the strategy's (fragility.plan_run)
+
+
 class PairsFinderRequest(BaseModel):
     config: str
     strategy: str | None = None
@@ -379,7 +386,13 @@ class WebPortal:
 
     MAX_MESSAGES = 500
 
-    def __init__(self, bot: Any | None = None, *, on_shutdown: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        bot: Any | None = None,
+        *,
+        on_shutdown: Callable[[], None] | None = None,
+        shutdown_timeout_s: float | None = None,
+    ) -> None:
         self.bot = bot
         self.config: dict = getattr(bot, "config", {}) if bot else {}
         api_cfg = self.config.get("api_server", {}) if isinstance(self.config, dict) else {}
@@ -389,6 +402,10 @@ class WebPortal:
         # stop_all_in_process_bots) stop them too. A plain SIGINT would
         # otherwise only know to stop this portal's own server.
         self._on_shutdown = on_shutdown
+        # Overrides the Ctrl+C hard-exit watchdog - for a caller that waits on
+        # its own cleanup after start() returns (bot.py waits for fleet worker
+        # processes to finish stopping their bots).
+        self._shutdown_timeout_s = shutdown_timeout_s
 
         self._password: str = api_cfg.get("password", "VulcanTrader")
         self._token: str = secrets.token_urlsafe(32)
@@ -606,7 +623,9 @@ class WebPortal:
                         )
                         _os._exit(0)
 
-                    watchdog_s = 5.0 if self._on_shutdown is not None else 3.0
+                    watchdog_s = self._shutdown_timeout_s or (
+                        5.0 if self._on_shutdown is not None else 3.0
+                    )
                     t = threading.Timer(watchdog_s, _force)
                     t.daemon = True
                     t.start()
@@ -1104,6 +1123,22 @@ class WebPortal:
         @app.get("/api/backtests/{name}/volatility_bias", dependencies=[Depends(auth)])
         def api_bt_volatility_bias(name: str, regime_pair: str = "") -> dict:
             return self._backtest_volatility_bias(name, regime_pair)
+
+        @app.get("/api/backtests/{name}/analysis", dependencies=[Depends(auth)])
+        def api_bt_analysis(name: str, regime_pair: str = "") -> dict:
+            return self._backtest_analysis(name, regime_pair)
+
+        @app.get("/api/backtests/{name}/timing", dependencies=[Depends(auth)])
+        def api_bt_timing(name: str) -> dict:
+            return self._backtest_timing(name)
+
+        @app.post("/api/fragility/run", dependencies=[Depends(auth)])
+        def api_fragility_run(req: FragilityRunRequest) -> dict:
+            return self._submit_fragility_job(req.backtest, req.config, req.refresh, req.detail)
+
+        @app.get("/api/fragility", dependencies=[Depends(auth)])
+        def api_fragility(backtest: str, config: str = "", detail: bool = False) -> dict:
+            return self._fragility_status(backtest, config or None, detail)
 
         @app.get("/api/backtests/{name}/mae_mfe", dependencies=[Depends(auth)])
         def api_bt_mae_mfe(
@@ -2852,6 +2887,13 @@ class WebPortal:
             tid = in_process_threads.get(account_name) if (running and proc is None) else None
             in_process = tid is not None
             proc_stats = self._thread_stats(tid) if in_process else self._proc_stats(proc)
+            # Net% = realised profit / starting capital - the same definition as the ROI tile
+            # on that bot's own dashboard (_account_dashboard uses the same capital helper).
+            # None until the bot has closed a trade, so "no history" never sorts as "0%".
+            closed_n = int((bot_info or {}).get("closed_trades") or 0)
+            closed_pnl = float((bot_info or {}).get("closed_profit_abs") or 0.0)
+            capital = self._starting_capital_from_config(raw, dry_run)
+            net_pct = (closed_pnl / capital * 100.0) if (closed_n and capital) else None
             out.append({
                 "name": p.stem,
                 "filename": p.name,
@@ -2865,6 +2907,13 @@ class WebPortal:
                 "account_name": account_name,
                 "running": running,
                 "crashed": bool(bot_info and bot_info.get("crashed")),
+                # a saved account file exists, so /api/dashboard?bot=<account_name> can serve
+                # this bot's trades/stats even when it is stopped or crashed
+                "has_account": bot_info is not None,
+                "closed_trades": closed_n,
+                "closed_profit_abs": closed_pnl,
+                "starting_capital": capital,
+                "net_pct": net_pct,
                 "cpu_percent": proc_stats["cpu_percent"],
                 "memory_mb": proc_stats["memory_mb"],
                 "in_process": in_process,
@@ -3314,22 +3363,38 @@ class WebPortal:
             job["status"] = "running"
             job["started_at"] = datetime.now(UTC).isoformat()
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "VulcanTrader.bot",
-            "backtest",
-            "-c",
-            job["config"],
-            "--user-data-dir",
-            str(self._user_data_dir()),
-        ]
-        if job.get("strategy"):
-            cmd += ["-s", job["strategy"]]
-        if job.get("timerange"):
-            cmd += ["--timerange", job["timerange"]]
-        if job.get("engine") == "rust":
-            cmd += ["--engine", "rust"]
+        # A job may build its own command here, in its own thread (fragility: preparing the BTC
+        # candles takes seconds), and return a hook to run once the command exits 0.
+        prepare = job.pop("_prepare", None)
+        on_success = None
+        if prepare is not None:
+            try:
+                cmd, on_success = prepare()
+            except Exception as exc:
+                with self._jobs_lock:
+                    job["status"] = "error"
+                    job["error"] = str(exc)
+                    job["log"].append(f"[prepare failed] {exc}")
+                    job["finished_at"] = datetime.now(UTC).isoformat()
+                logger.exception("Failed to prepare job %s", job_id)
+                return
+        else:
+            cmd = [
+                sys.executable,
+                "-m",
+                "VulcanTrader.bot",
+                "backtest",
+                "-c",
+                job["config"],
+                "--user-data-dir",
+                str(self._user_data_dir()),
+            ]
+            if job.get("strategy"):
+                cmd += ["-s", job["strategy"]]
+            if job.get("timerange"):
+                cmd += ["--timerange", job["timerange"]]
+            if job.get("engine") == "rust":
+                cmd += ["--engine", "rust"]
 
         job["log"].append(f"$ {' '.join(cmd)}")
         try:
@@ -3373,8 +3438,17 @@ class WebPortal:
 
         rc = proc.wait()
 
+        if rc == 0 and on_success is not None:
+            try:
+                on_success()
+            except Exception as exc:
+                rc = 1
+                with self._jobs_lock:
+                    job["error"] = str(exc)
+                    job["log"].append(f"[finish failed] {exc}")
+
         result_file: str | None = None
-        if bt_dir.is_dir():
+        if bt_dir.is_dir() and on_success is None:
             new_files = sorted(
                 (p for p in bt_dir.glob("*.json") if p.name not in existing_files and not p.name.endswith(".meta.json")),
                 key=lambda p: p.stat().st_mtime,
@@ -3389,6 +3463,105 @@ class WebPortal:
             job["finished_at"] = datetime.now(UTC).isoformat()
             job["result_file"] = result_file
             job["_proc"] = None
+
+    # ------------------------------------------------------------------
+    # Fragility: the strategy on BTC alone since 2017 (VulcanTrader/fragility.py)
+    # ------------------------------------------------------------------
+
+    def _fragility_target(self, backtest: str, config: str | None) -> tuple[str, str]:
+        """(config, strategy) for a backtest result: its strategy, run with `config`, or else with
+        the bot config that runs that strategy."""
+        from VulcanTrader import fragility
+
+        names = list((self._load_backtest(backtest).get("strategy") or {}).keys())
+        if not names:
+            raise HTTPException(status_code=400, detail="Backtest result names no strategy")
+        strategy = self._validate_name(names[0], "strategy")
+        if config:
+            cfg = self._validate_name(config.removesuffix(".json"), "config")
+            if not (self._configs_dir() / f"{cfg}.json").is_file():
+                raise HTTPException(status_code=404, detail=f"Config not found: {cfg}.json")
+            return cfg, strategy
+        found = fragility.configs_for_strategy(self._user_data_dir(), strategy)
+        if not found:
+            raise HTTPException(status_code=400,
+                                detail=f"No config in user_data/configs runs {strategy}: pick one")
+        return found[0], strategy
+
+    def _fragility_job(self, cfg: str, strategy: str, detail: bool = False) -> dict | None:
+        """Newest fragility job for (cfg, strategy) in this mode."""
+        with self._jobs_lock:
+            jobs = [j for j in self._jobs.values()
+                    if j.get("kind") == "fragility" and j["config"] == cfg and j.get("strategy") == strategy
+                    and bool(j.get("detail")) == detail]
+        return max(jobs, key=lambda j: j.get("created_at") or "", default=None)
+
+    def _fragility_status(self, backtest: str, config: str | None, detail: bool = False) -> dict:
+        """ready (+ analysis) / running / failed / none, for the Analysis panel's Fragility section."""
+        from VulcanTrader import fragility
+
+        cfg, strategy = self._fragility_target(backtest, config)
+        base = {"config": cfg, "strategy": strategy, "detail": detail}
+        job = self._fragility_job(cfg, strategy, detail)
+        if job is not None and job["status"] in ("queued", "running"):
+            with self._jobs_lock:
+                last = job["log"][-1] if job["log"] else ""
+            return {**base, "status": "running", "job": self._job_summary(job), "last_log": last}
+        result = fragility.cached_run(self._user_data_dir(), cfg, strategy, detail)
+        if result is not None:
+            return {**base, "status": "ready", "analysis": fragility.analyze_run(self._user_data_dir(), result)}
+        if job is not None and job["status"] in ("failed", "error", "cancelled"):
+            with self._jobs_lock:
+                tail = list(job["log"])[-12:]
+            return {**base, "status": "failed", "job": self._job_summary(job), "log_tail": tail}
+        return {**base, "status": "none"}
+
+    def _submit_fragility_job(self, backtest: str, config: str | None, refresh: bool = False,
+                              detail: bool = False) -> dict:
+        from VulcanTrader import fragility
+
+        cfg, strategy = self._fragility_target(backtest, config)
+        status = self._fragility_status(backtest, cfg, detail)
+        if status["status"] == "running" or (status["status"] == "ready" and not refresh):
+            return status
+        if self._running_job_count() >= self.MAX_CONCURRENT_JOBS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Max concurrent jobs reached ({self.MAX_CONCURRENT_JOBS}). Wait for a job to finish.",
+            )
+        user_data = self._user_data_dir()
+
+        def _prepare():
+            plan = fragility.plan_run(user_data, cfg, strategy, detail=detail)
+            return plan["cmd"], lambda: fragility.finish_run(plan)
+
+        job_id = uuid.uuid4().hex[:12]
+        job: dict = {
+            "id": job_id,
+            "kind": "fragility",
+            "config": cfg,
+            "strategy": strategy,
+            "detail": detail,
+            "timerange": fragility.TIMERANGE,
+            "engine": "python" if detail else "rust",
+            "status": "queued",
+            "exit_code": None,
+            "created_at": datetime.now(UTC).isoformat(),
+            "started_at": None,
+            "finished_at": None,
+            "log": deque(maxlen=self.MAX_JOB_LOG_LINES),
+            "result_file": None,
+            "error": None,
+            "_proc": None,
+            "_prepare": _prepare,
+        }
+        with self._jobs_lock:
+            self._jobs[job_id] = job
+            self._evict_old_jobs_locked()
+        threading.Thread(target=self._run_job_thread, args=(job_id,),
+                         name=f"fragility-job-{job_id}", daemon=True).start()
+        return {"config": cfg, "strategy": strategy, "detail": detail, "status": "running",
+                "job": self._job_summary(job), "last_log": ""}
 
     # ------------------------------------------------------------------
     # Hyperopt
@@ -4974,14 +5147,47 @@ class WebPortal:
         Classify AMBIENT market volatility (ATR% vs its own trailing
         baseline - see BacktestRegimeAnalyzer.classify_volatility) at each
         trade's entry and compare performance between HIGH_VOL / LOW_VOL
-        entries.
+        entries. The volatility half of _backtest_analysis.
+        """
+        return self._backtest_analysis(name, regime_pair)["volatility"]
 
-        Mirrors _backtest_regime_analysis's data loading and pair-selection
-        logic exactly (same reference-pair priority order), but classifies
-        candles by realized volatility instead of trend direction.
+    def _backtest_timing(self, name: str) -> dict:
+        """The Analysis panel's Timing section: the backtest's trades with entries and/or exits moved
+        -10..+10 minutes along the 1m price path (VulcanTrader/timing.py). 1m candles from the
+        backtest's datadir first, Binance's after it."""
+        from VulcanTrader import timing
+
+        bt = self._load_backtest(name)
+        trades, tf, trading_mode = self._bt_extract_trades_and_meta(bt)
+        if not tf:
+            raise HTTPException(status_code=400, detail="Backtest result missing timeframe")
+        binance = self._user_data_dir() / "data" / "binance"
+        sources = timing.default_sources([self._datadir()], binance if binance.is_dir() else None,
+                                         trading_mode or "spot")
+        result = timing.analyze([t for t in trades if not t.get("is_open")], sources, tf, exact_times=False)
+        if not result["used"]:
+            raise HTTPException(status_code=404, detail="No 1m candles cover this backtest's trades")
+        entry = next(iter((bt.get("strategy") or {}).values()), {}) if isinstance(bt.get("strategy"), dict) else {}
+        detail = (entry.get("timeframe_detail") or bt.get("timeframe_detail") or "") or None
+        # Without 1m candles inside the strategy's own, a backtest decides ROI / trailing / stop hits from the
+        # candle's high and low with no order: its intrabar exits flatter it, and so does this re-pricing of them.
+        result.update(timeframe_detail=detail, intrabar_resolved=tf == "1m" or detail == "1m")
+        return result
+
+    def _backtest_analysis(self, name: str, regime_pair: str = "") -> dict:
+        """
+        The backtester's Analysis panel: volatility bias (HIGH_VOL / LOW_VOL
+        at entry, analyze_trades_by_volatility) and regime bias (bear /
+        ranging / bull at entry, analyze_regime_bias), from one load of the
+        candles.
+
+        Mirrors _backtest_regime_analysis's data loading and pair selection:
+        ALL (the default, also ``""``) labels each trade from its own pair's
+        candles; otherwise one reference pair labels every trade, chosen in
+        order from ``regime_pair``, BTC, then the first traded pair with data.
+        ``__btc__`` skips straight to BTC (the panel's Auto option).
         """
         try:
-            import pandas as pd
             from VulcanTrader.regime_analysis import BacktestRegimeAnalyzer
             from VulcanTrader.data.history import load_pair_history
             from VulcanTrader.enums import CandleType, TradingMode
@@ -5031,99 +5237,66 @@ class WebPortal:
                 )
                 break
 
-        def _norm_df(df):
-            if "date" in df.columns:
-                df = df.copy()
-                df["date"] = pd.to_datetime(df["date"])
-                if hasattr(df["date"].dtype, "tz") and df["date"].dtype.tz is not None:
-                    df["date"] = df["date"].dt.tz_localize(None)
-            return BacktestRegimeAnalyzer.classify_volatility(df)
+        _classify = BacktestRegimeAnalyzer.classify_market
 
-        # ── ALL mode: classify each trade by its own pair's volatility ──────
+        frames: dict = {}
+        reference = None
         if regime_pair.lower() in ("", "__all__", "all"):
-            from datetime import datetime as _dt
-
-            pair_vol_data: dict[str, tuple] = {}
+            # ── ALL mode: each trade by its own pair's candles ──────────────
+            chosen_pair = "ALL"
             for pair in traded_pairs:
                 df = _try_load(pair)
                 if df is not None:
-                    vdf = _norm_df(df)
-                    raw = pd.to_datetime(vdf["date"])
-                    if hasattr(raw.dtype, "tz") and raw.dtype.tz is not None:
-                        raw = raw.dt.tz_localize(None)
-                    _dates = raw.to_list()
-                    pair_vol_data[pair] = (
-                        _dates,
-                        vdf["vol_bucket"].to_list(),
-                        BacktestRegimeAnalyzer.resolve_interval(tf, _dates),
-                    )
-
-            if not pair_vol_data:
+                    frames[pair] = _classify(df)
+            if not frames:
                 raise HTTPException(
                     status_code=404,
                     detail="No candle data found for any traded pair. "
-                           "Download OHLCV data or select a specific volatility pair.",
+                           "Download OHLCV data or select a specific pair.",
+                )
+        else:
+            # ── Specific pair or BTC fallback ────────────────────────────────
+            btc_candidates = ["BTC/USDT", "BTC/USDT:USDT", "BTC/USDC:USDC", "BTC/USDC",
+                              "BTC/USD", "BTC/BUSD"]
+            candidates = [regime_pair] if regime_pair.lower() != "__btc__" else []
+            candidates.extend(btc_candidates)
+            candidates.extend(traded_pairs)
+            chosen_pair = None
+            for pair in candidates:
+                df = _try_load(pair)
+                if df is not None:
+                    chosen_pair = pair
+                    reference = _classify(df)
+                    break
+            if reference is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No candle data found for volatility / regime classification. "
+                           "Ensure BTC/USDT data is downloaded or pass ?regime_pair=<pair>.",
                 )
 
-            def _lookup_per_pair(pair: str, dt_str: str):
-                if pair not in pair_vol_data:
-                    return None
-                dates, labels, interval = pair_vol_data[pair]
-                try:
-                    dt = _dt.fromisoformat(str(dt_str)[:19].replace(" ", "T"))
-                except ValueError:
-                    return None
-                return BacktestRegimeAnalyzer.label_at_entry(dates, labels, dt, interval)
-
-            trade_vol_buckets = [
-                _lookup_per_pair(t.get("pair", ""), t.get("open_date") or "")
-                for t in trades
-            ]
-
-            result = BacktestRegimeAnalyzer.analyze_trades_by_volatility(
-                trades=trades,
-                vol_df=None,
-                starting_capital=starting_capital,
-                trade_vol_buckets=trade_vol_buckets,
-                timeframe=tf,
-            )
-            result["vol_pair"] = "ALL"
-            result["timeframe"] = tf
-            result["starting_capital"] = starting_capital
-            return result
-
-        # ── Specific pair or BTC fallback ────────────────────────────────────
-        btc_candidates = ["BTC/USDT", "BTC/USDT:USDT", "BTC/USD", "BTC/BUSD"]
-        candidates = [regime_pair] if regime_pair else []
-        candidates.extend(btc_candidates)
-        candidates.extend(traded_pairs)
-
-        chosen_pair = None
-        vol_df = None
-        for pair in candidates:
-            df = _try_load(pair)
-            if df is not None:
-                chosen_pair = pair
-                vol_df = _norm_df(df)
-                break
-
-        if vol_df is None:
-            raise HTTPException(
-                status_code=404,
-                detail="No candle data found for volatility classification. "
-                       "Ensure BTC/USDT data is downloaded or pass ?regime_pair=<pair>.",
-            )
-
-        result = BacktestRegimeAnalyzer.analyze_trades_by_volatility(
+        labels = BacktestRegimeAnalyzer.entry_labels(
+            trades, frames, ["regime", "vol_bucket"], timeframe=tf, reference=reference,
+        )
+        volatility = BacktestRegimeAnalyzer.analyze_trades_by_volatility(
             trades=trades,
-            vol_df=vol_df,
+            vol_df=None,
             starting_capital=starting_capital,
+            trade_vol_buckets=labels["vol_bucket"],
             timeframe=tf,
         )
-        result["vol_pair"] = chosen_pair
-        result["timeframe"] = tf
-        result["starting_capital"] = starting_capital
-        return result
+        volatility.update(vol_pair=chosen_pair, timeframe=tf, starting_capital=starting_capital)
+        regime = BacktestRegimeAnalyzer.analyze_regime_bias(
+            trades, labels["regime"], starting_capital=starting_capital,
+        )
+        regime.update(regime_pair=chosen_pair, timeframe=tf, starting_capital=starting_capital)
+        return {
+            "volatility": volatility,
+            "regime": regime,
+            "pair": chosen_pair,
+            "timeframe": tf,
+            "starting_capital": starting_capital,
+        }
 
 
 # ---------------------------------------------------------------------------

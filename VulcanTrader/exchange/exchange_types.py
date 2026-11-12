@@ -25,6 +25,9 @@ class TraderHas(TypedDict, total=False):
     ohlcv_params: dict
     ohlcv_candle_limit: int
     ohlcv_has_history: bool
+    # Refresh cached pairs from their last cached candle instead of re-fetching
+    # the full candle limit (for exchanges that charge per candle returned).
+    ohlcv_incremental_refresh: bool
     ohlcv_partial_candle: bool
     ohlcv_require_since: bool
     ohlcv_volume_currency: str

@@ -109,6 +109,7 @@ def setup(
     log_to_discord: bool = False,
     quiet_libs: bool = True,
     subdir: Optional[str] = None,
+    name_suffix: str = "",
 ) -> Path:
     """Configure root logging. Safe to call more than once (subsequent calls are no-ops).
 
@@ -117,6 +118,9 @@ def setup(
         (e.g. data_server) whose logs would otherwise be interleaved anonymously
         among every trading bot's own timestamped file in the shared top-level
         `logs/` directory, indistinguishable without opening each one.
+    :param name_suffix: appended to the file name. Needed when several
+        processes start within the same second (fleet workers) - the name is
+        only second-resolution, and they would otherwise share one file.
     Returns the path of the active log file.
     """
     global _configured, _log_file
@@ -142,7 +146,7 @@ def setup(
     log_dir = (_LOG_DIR / subdir) if subdir else _LOG_DIR
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    _log_file = log_dir / f"{_LOG_PREFIX}_{timestamp}.txt"
+    _log_file = log_dir / f"{_LOG_PREFIX}_{timestamp}{name_suffix}.txt"
     file_handler = _FlushingRotatingFileHandler(
         _log_file,
         maxBytes=_MAX_BYTES,

@@ -43,6 +43,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,13 +52,13 @@ from typing import Any, Callable
 # aborting outright). Exchange.__init__ creates its event loop via
 # asyncio.new_event_loop(), which follows whatever policy is active at that
 # point, so this must run before Exchange is imported/used. Shared with
-# bot.py (VulcanTrader/win_asyncio_fix.py) so the policy switch and its
+# bot.py (VulcanTrader/config/asyncio_config.py) so the policy switch and its
 # matching noise-suppression filter can't drift apart again - a previous
 # version of this file set the policy but not the filter, so this process's
 # self-pipe resets logged raw tracebacks all night with no mitigation.
-from VulcanTrader.win_asyncio_fix import apply as _apply_win_asyncio_fix
+from VulcanTrader.config.asyncio_config import asyncio_setup
 
-_apply_win_asyncio_fix()
+asyncio_setup()
 
 from pandas import DataFrame, concat, to_datetime
 
@@ -245,13 +246,14 @@ class DataCollector:
         # cache-merge path (hit as soon as a pair already has klines to merge
         # against, i.e. every tick after the first) raises AttributeError for the
         # *entire* refresh_latest_ohlcv() call - discovered the same way in
-        # VulcanTrader/ratelimit_probe.py, fixed there the same way.
+        # VulcanTrader/util/ratelimit_probe.py, fixed there the same way.
         self.exchange._set_startup_candle_count(config)
 
         self.datadir: Path = config["datadir"]
         self.data_format: str = config.get("dataformat_ohlcv", "feather")
         self.candle_type: CandleType = config.get("candle_type_def", CandleType.SPOT)
         self.data_handler: IDataHandler = get_datahandler(self.datadir, self.data_format)
+        self._disk = OhlcvDiskSync(self.data_handler)
         self.persist_to_disk = persist_to_disk
 
         self.on_ohlcv = on_ohlcv
@@ -357,21 +359,7 @@ class DataCollector:
         # back to an empty frame for that one pair/timeframe and keep going.
         self._cache: dict[PairWithTimeframe, DataFrame] = {}
         for pair_key in self.pairlist:
-            pair, tf, c_type = pair_key
-            try:
-                self._cache[pair_key] = self.data_handler.ohlcv_load(
-                    pair,
-                    timeframe=tf,
-                    candle_type=c_type,
-                    fill_missing=False,
-                    drop_incomplete=False,
-                    warn_no_data=False,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to load cached OHLCV for %s - starting with an empty cache for it", pair_key
-                )
-                self._cache[pair_key] = DataFrame()
+            self._cache[pair_key] = self._load_cached(pair_key)
 
         self._stop = False
         # Set by set_pairs() whenever the pair assignment actually changes, so
@@ -398,6 +386,34 @@ class DataCollector:
 
     def stop(self) -> None:
         self._stop = True
+
+    def _load_cached(self, pair_key: PairWithTimeframe) -> DataFrame:
+        """On-disk history to seed the in-memory cache with. An unreadable file must
+        not prevent startup, so it seeds empty - `_disk.store()` won't write over that
+        file until it can be read again."""
+        df = self._disk.load(*pair_key)
+        if df is None:
+            logger.error("Starting %s with an empty in-memory cache - its file can't be read", pair_key)
+            return DataFrame()
+        return self._bounded(pair_key, df)
+
+    def _bounded(self, pair_key: PairWithTimeframe, df: DataFrame) -> DataFrame:
+        """The tail of a series kept in memory: enough to merge new candles into and
+        to seed the exchange's candle cache on a warm start (one request's candle
+        limit - see _seed_exchange_klines). The full history stays on disk. Copied,
+        because a pandas >= 3 copy-on-write slice would keep the whole frame alive.
+        Holding every collected pair's complete 1m/5m history here was half of what
+        grew the master past 13 GB."""
+        try:
+            keep = max(
+                _CACHE_TAIL_CANDLES,
+                int(self.exchange.ohlcv_candle_limit(pair_key[1], pair_key[2])),
+            )
+        except Exception:
+            keep = _CACHE_TAIL_CANDLES
+        if len(df) <= keep:
+            return df
+        return df.iloc[-keep:].copy()
 
     def _build_pairlist(self, pairs: list[str]) -> ListPairsWithTimeframes:
         """Standard `(pair, tf, candle_type)` combos for every configured timeframe,
@@ -429,22 +445,7 @@ class DataCollector:
             new_keys = set(new_pairlist)
             old_keys = set(self.pairlist)
             for pair_key in new_keys - old_keys:
-                pair, tf, c_type = pair_key
-                try:
-                    self._cache[pair_key] = self.data_handler.ohlcv_load(
-                        pair,
-                        timeframe=tf,
-                        candle_type=c_type,
-                        fill_missing=False,
-                        drop_incomplete=False,
-                        warn_no_data=False,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to load cached OHLCV for newly-assigned %s - starting empty",
-                        pair_key,
-                    )
-                    self._cache[pair_key] = DataFrame()
+                self._cache[pair_key] = self._load_cached(pair_key)
             for pair_key in old_keys - new_keys:
                 self._cache.pop(pair_key, None)
             self.pairs = new_pairs
@@ -483,22 +484,7 @@ class DataCollector:
             new_keys = set(new_pairlist)
             old_keys = set(self.pairlist)
             for pair_key in new_keys - old_keys:
-                pair, tf, c_type = pair_key
-                try:
-                    self._cache[pair_key] = self.data_handler.ohlcv_load(
-                        pair,
-                        timeframe=tf,
-                        candle_type=c_type,
-                        fill_missing=False,
-                        drop_incomplete=False,
-                        warn_no_data=False,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to load cached OHLCV for newly-assigned %s - starting empty",
-                        pair_key,
-                    )
-                    self._cache[pair_key] = DataFrame()
+                self._cache[pair_key] = self._load_cached(pair_key)
             for pair_key in old_keys - new_keys:
                 self._cache.pop(pair_key, None)
             self.pairlist = new_pairlist
@@ -528,9 +514,13 @@ class DataCollector:
         if existing is not None and not existing.empty and len(merged) == len(existing):
             # Nothing new landed this tick - skip the disk write and the hook.
             return False
-        self._cache[pair_key] = merged
+        self._cache[pair_key] = self._bounded(pair_key, merged)
         if self.persist_to_disk:
-            self.data_handler.ohlcv_store(pair, timeframe, data=merged, candle_type=candle_type)
+            # merge_into_file, not store: the cache holds only a tail, and store()
+            # would replace the file's full history with it.
+            written = self._disk.merge_into_file(pair, timeframe, candle_type, merged)
+            if written is not None:
+                self._cache[pair_key] = self._bounded(pair_key, written)
         if self.on_ohlcv is not None:
             try:
                 self.on_ohlcv(pair_key, new_data)
@@ -617,6 +607,30 @@ class DataCollector:
                 chosen.add(pair_key[0])
             selected.append(pair_key)
         return selected
+
+    def _seed_exchange_klines(self, pairlist: ListPairsWithTimeframes) -> None:
+        """Give the exchange's candle cache the on-disk history for entries it
+        hasn't fetched yet, so (on exchanges with ohlcv_incremental_refresh) the
+        first refresh after a restart only requests candles since the last one
+        on disk instead of the full candle limit - a cold restart otherwise
+        re-downloaded every pair/timeframe (~40 min of stale bots). If the disk
+        copy is too old to bridge in one call, Exchange._build_coroutine evicts
+        it and does a full fetch as before."""
+        exchange = self.exchange
+        if not exchange.trader_has.get("ohlcv_incremental_refresh"):
+            return
+        for pair_key in pairlist:
+            if pair_key in exchange._klines:
+                continue
+            df = self._cache.get(pair_key)
+            if df is None or df.empty:
+                continue
+            limit = exchange.ohlcv_candle_limit(pair_key[1], pair_key[2])
+            seeded = df.tail(limit).reset_index(drop=True)
+            exchange._klines[pair_key] = seeded
+            exchange._pairs_last_refresh_time[pair_key] = int(
+                seeded["date"].iloc[-1].timestamp() * 1000
+            )
 
     def _record_batch_outcome(self, *, rate_limited: bool) -> None:
         """Adjust `_batch_cap` after one OHLCV fetch: cut it back hard (and pause
@@ -707,6 +721,7 @@ class DataCollector:
                     fetching, self._batch_cap,
                 )
 
+            self._seed_exchange_klines(batch_pairlist)
             rate_limit_cap = _RateLimitLogCapture(owner_thread=threading.get_ident())
             exchange_logger = logging.getLogger("VulcanTrader.exchange")
             exchange_logger.addHandler(rate_limit_cap)
@@ -1095,6 +1110,16 @@ class DataCollector:
         def _should_stop() -> bool:
             return self._stop or (stop_event is not None and stop_event.is_set())
 
+        threading.Thread(
+            target=self._ws_keepalive_loop, args=(_should_stop,),
+            name="DataCollector-ws-keepalive", daemon=True,
+        ).start()
+        self._tick_started_at: float | None = None
+        threading.Thread(
+            target=self._collector_watchdog_loop, args=(_should_stop,),
+            name="DataCollector-watchdog", daemon=True,
+        ).start()
+
         while not _should_stop():
             # Cleared here (not after the sleep) so a set_pairs() call that lands
             # while collect_once() is already running - after it snapshotted the
@@ -1102,10 +1127,13 @@ class DataCollector:
             # of being silently absorbed by a clear() that happens afterward.
             self._wake_event.clear()
             t0 = time.time()
+            self._tick_started_at = t0
             try:
                 self.collect_once()
             except Exception:
                 logger.exception("Error while refreshing data")
+            finally:
+                self._tick_started_at = None
 
             # Account for however long collect_once() itself took. When the tick
             # had to defer pairs that were genuinely due, come back promptly to
@@ -1130,6 +1158,56 @@ class DataCollector:
                 slept += step
         logger.info("Data collector stopped.")
 
+    _TICK_STUCK_DUMP_S = 900.0
+
+    def _collector_watchdog_loop(self, should_stop: Callable[[], bool]) -> None:
+        """A tick normally takes seconds. This collector once sat inside a
+        single tick for over an hour - no log line, no CPU, no requests, so
+        nothing showed where it was blocked. Dump every thread's stack once per
+        tick that runs past _TICK_STUCK_DUMP_S, and on demand when
+        logs/data_server/dumpstacks is touched."""
+        from VulcanTrader.util.thread_dump import dump_if_requested, dump_thread_stacks
+
+        log_dir = Path(self.config.get("user_data_dir") or "user_data") / "logs" / "data_server"
+        dumped_for: float | None = None
+        while not should_stop():
+            started = self._tick_started_at
+            if (
+                started is not None
+                and started != dumped_for
+                and time.time() - started > self._TICK_STUCK_DUMP_S
+            ):
+                dumped_for = started
+                path = dump_thread_stacks(log_dir, "collector-stuck")
+                logger.warning(
+                    "Collector tick has been running for %.0f min - possibly stuck; "
+                    "thread stacks written to %s", (time.time() - started) / 60, path,
+                )
+            requested = dump_if_requested(log_dir / "dumpstacks", "data_server")
+            if requested:
+                logger.warning("Thread stacks written to %s", requested)
+            time.sleep(15)
+
+    _WS_KEEPALIVE_S = 30.0
+
+    def _ws_keepalive_loop(self, should_stop: Callable[[], bool]) -> None:
+        """ExchangeWS drops a candle subscription that isn't re-requested within
+        its timeframe + 20s, but a tick can run longer than that (backfill,
+        rate-limit pacing). Once the 1m/5m subscriptions lapse, every refresh
+        falls back to REST - which keeps ticks slow, so they keep lapsing.
+        Re-request every tracked combination on a fixed cadence instead."""
+        while not should_stop():
+            exchange_ws = getattr(self.exchange, "_exchange_ws", None)
+            if exchange_ws is not None:
+                with self._pairs_lock:
+                    pairlist = [pk for pk in self.pairlist if pk[2] != CandleType.FUNDING_RATE]
+                for pair, timeframe, candle_type in pairlist:
+                    try:
+                        exchange_ws.schedule_ohlcv(pair, timeframe, candle_type)
+                    except Exception:
+                        logger.debug("ws keepalive failed for %s %s", pair, timeframe, exc_info=True)
+            time.sleep(self._WS_KEEPALIVE_S)
+
     def close(self) -> None:
         self.exchange.close()
 
@@ -1142,6 +1220,162 @@ OhlcvKey = tuple[str, str, str, str]  # exchange, pair, timeframe, candle_type
 FundingKey = tuple[str, str]  # exchange, pair
 TradesKey = tuple[str, str]  # exchange, pair
 TickerKey = tuple[str, str]  # exchange, pair
+
+
+class OhlcvDiskSync:
+    """Loads and stores one writer's OHLCV files without dropping history someone
+    else put there.
+
+    Each writer (DataCache on a master, DataCollector standalone) keeps its own
+    in-memory copy of every file, seeded from disk once, and used to write that
+    copy back over the file on every new candle. Two ways that lost history:
+    - An unreadable file loads as empty, so the copy held only the newest fetch
+      and that replaced the file (2026-10-15: 254 Hyperliquid files cut back to
+      their last 5000 candles).
+    - Anything written to the file meanwhile (an archive restore, download-data)
+      was overwritten by the stale copy (2026-11-01: a restore of those files was
+      undone within a day).
+    So each file's (mtime, size) is remembered at this writer's own loads and
+    stores. If it differs at the next store, the file is re-read and merged in
+    first; if it exists but can't be read, the store is skipped."""
+
+    def __init__(self, data_handler: IDataHandler) -> None:
+        self._data_handler = data_handler
+        self._seen: dict[PairWithTimeframe, tuple[int, int]] = {}
+        self._refused: set[PairWithTimeframe] = set()
+        self._lock = threading.Lock()
+
+    def _path(self, pair: str, timeframe: str, candle_type: CandleType) -> Path:
+        dh = self._data_handler
+        return dh._pair_data_filename(dh._datadir, pair, timeframe, candle_type)
+
+    @staticmethod
+    def _stat(path: Path) -> tuple[int, int] | None:
+        try:
+            st = path.stat()
+        except FileNotFoundError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
+    def load(self, pair: str, timeframe: str, candle_type: CandleType | str) -> DataFrame | None:
+        """The file's candles (empty if there is no file), or None if it exists but
+        can't be read."""
+        ct = CandleType(candle_type)
+        key = (pair, timeframe, ct)
+        # Stat before reading: if the file is replaced mid-read, the next store sees a
+        # changed stat and reads it again.
+        before = self._stat(self._path(pair, timeframe, ct))
+        try:
+            df = self._data_handler.ohlcv_load(
+                pair,
+                timeframe=timeframe,
+                candle_type=ct,
+                fill_missing=False,
+                drop_incomplete=False,
+                warn_no_data=False,
+                raise_on_error=True,
+            )
+        except Exception:
+            with self._lock:
+                quiet = key in self._refused  # already reported, retried every store
+            if not quiet:
+                logger.exception("Can't read on-disk OHLCV for %s", key)
+            return None
+        with self._lock:
+            if before is None:
+                self._seen.pop(key, None)
+            else:
+                self._seen[key] = before
+        return df
+
+    def store(
+        self, pair: str, timeframe: str, candle_type: CandleType | str, data: DataFrame
+    ) -> DataFrame | None:
+        """Write `data`, first merging in whatever reached the file since this writer
+        last loaded or stored it. Returns what was written (cache that instead of
+        `data`), or None if the file couldn't be read and nothing was written."""
+        ct = CandleType(candle_type)
+        key = (pair, timeframe, ct)
+        path = self._path(pair, timeframe, ct)
+        current = self._stat(path)
+        with self._lock:
+            seen = self._seen.get(key)
+        if current is not None and current != seen:
+            disk = self.load(pair, timeframe, ct)
+            if disk is None:
+                with self._lock:
+                    first = key not in self._refused
+                    self._refused.add(key)
+                if first:
+                    logger.error(
+                        "Not writing %s: %s can't be read, and writing would replace its "
+                        "history with the %d candles held in memory. Holding new candles "
+                        "in memory until the file is readable again.",
+                        key, path, len(data),
+                    )
+                return None
+            if not disk.empty:
+                held = len(data)
+                data = clean_ohlcv_dataframe(
+                    concat([disk, data], axis=0),
+                    timeframe,
+                    pair,
+                    fill_missing=False,
+                    drop_incomplete=False,
+                )
+                if len(data) > held:
+                    logger.warning(
+                        "%s changed on disk outside this writer - merged %d candle(s) from "
+                        "it instead of overwriting them",
+                        key, len(data) - held,
+                    )
+        self._data_handler.ohlcv_store(pair, timeframe, data=data, candle_type=ct)
+        stored = self._stat(path)
+        with self._lock:
+            if stored is not None:
+                self._seen[key] = stored
+            self._refused.discard(key)
+        return data
+
+    def merge_into_file(
+        self, pair: str, timeframe: str, candle_type: CandleType | str, recent: DataFrame
+    ) -> DataFrame | None:
+        """Merge `recent` candles into the file's full history and write it back.
+
+        Unlike store(), the caller doesn't have to hold the whole history in memory -
+        DataCache only keeps a bounded tail per series (see _CACHE_TAIL_CANDLES), so
+        handing that tail to store() would cut the file down to it. Returns the full
+        history written, or None if the file can't be read (nothing is written; the
+        caller keeps holding `recent` and retries on its next new candle)."""
+        ct = CandleType(candle_type)
+        key = (pair, timeframe, ct)
+        disk = self.load(pair, timeframe, ct)
+        if disk is None:
+            with self._lock:
+                first = key not in self._refused
+                self._refused.add(key)
+            if first:
+                logger.error(
+                    "Not writing %s: its file can't be read, and writing would replace its "
+                    "history with the %d candles held in memory. Holding new candles in "
+                    "memory until the file is readable again.",
+                    key, len(recent),
+                )
+            return None
+        if disk.empty:
+            data = recent
+        else:
+            data = clean_ohlcv_dataframe(
+                concat([disk, recent], axis=0),
+                timeframe,
+                pair,
+                fill_missing=False,
+                drop_incomplete=False,
+            )
+        # load() above just recorded the file's stat, so store() writes straight
+        # through unless something else changed the file in between (then it merges
+        # that in too, exactly as for any other store).
+        return self.store(pair, timeframe, ct, data)
 
 
 class DataCache:
@@ -1164,35 +1398,47 @@ class DataCache:
         # caller (get_ticker's max_age_s) rather than just "present = usable".
         self._tickers: dict[TickerKey, tuple[dict, float]] = {}
         self._data_handler = data_handler
+        self._disk = OhlcvDiskSync(data_handler) if data_handler is not None else None
+        # Throttled persistence - see merge_ohlcv. When each series was last
+        # written, which ones hold candles not yet on disk, and when the
+        # leftover-dirty sweep last ran.
+        self._persisted_at: dict[OhlcvKey, float] = {}
+        self._dirty: set[OhlcvKey] = set()
+        self._last_dirty_sweep = time.monotonic()
         self._trades_data_handler = trades_data_handler
         self._trading_mode = trading_mode
 
     # -- OHLCV --------------------------------------------------------------
 
+    @staticmethod
+    def _tail(df: DataFrame) -> DataFrame:
+        """The bounded slice of a series that stays in memory. An explicit copy:
+        pandas >= 3 is copy-on-write, so a plain .tail() shares the full frame's
+        buffers and would keep the entire history alive anyway."""
+        if len(df) <= _CACHE_TAIL_CANDLES:
+            return df
+        return df.iloc[-_CACHE_TAIL_CANDLES:].copy()
+
     def merge_ohlcv(
         self, exchange: str, pair: str, timeframe: str, candle_type: str, new_df: DataFrame
     ) -> bool:
-        """Merge freshly-fetched candles in. Returns True if new data landed."""
+        """Merge freshly-fetched candles in. Returns True if new data landed.
+
+        Only the last _CACHE_TAIL_CANDLES of each series are kept in memory - the
+        full history lives on disk and is merged into there on each new candle
+        (OhlcvDiskSync.merge_into_file). Holding every file's whole history in RAM
+        is what grew this process to 13+ GB with 900+ series cached."""
         if new_df is None or new_df.empty:
             return False
         key: OhlcvKey = (exchange, pair, timeframe, candle_type)
         with self._lock:
             existing = self._ohlcv.get(key)
-            if existing is None and self._data_handler is not None:
-                try:
-                    existing = self._data_handler.ohlcv_load(
-                        pair,
-                        timeframe=timeframe,
-                        candle_type=CandleType(candle_type),
-                        fill_missing=False,
-                        drop_incomplete=False,
-                        warn_no_data=False,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to load on-disk OHLCV for %s - merging against an empty base", key
-                    )
-                    existing = None
+            if existing is None and self._disk is not None:
+                # None if the file can't be read: merge against an empty base in
+                # memory, and merge_into_file() declines to write over that file.
+                existing = self._disk.load(pair, timeframe, candle_type)
+                if existing is not None:
+                    existing = self._tail(existing)
             if existing is None or existing.empty:
                 merged = new_df
                 changed = True
@@ -1207,41 +1453,100 @@ class DataCache:
                 changed = len(merged) != len(existing)
             # Always keep the in-memory merge, even if the disk write below fails -
             # a persistence hiccup must not lose data that's already been merged.
-            self._ohlcv[key] = merged
-            if changed and self._data_handler is not None:
-                try:
-                    self._data_handler.ohlcv_store(
-                        pair, timeframe, data=merged, candle_type=CandleType(candle_type)
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to persist OHLCV for %s to disk - still cached in memory", key
-                    )
+            # (The tail spans ~6 weeks on 15m and ~2.8 days on 1m, so candles held
+            # through a disk outage shorter than that are still in it when the
+            # next write merges it into the file.)
+            self._ohlcv[key] = self._tail(merged)
+            if changed and self._disk is not None:
+                now = time.monotonic()
+                # Throttled: each write is a full read + full rewrite of the file,
+                # and with ~800 series collected (8 timeframes x 115 pairs) doing it
+                # on every new candle made persistence take 50-150s of every tick
+                # (~200 MB/min read + ~220 MB/min written, 2026-11-11), so 1m pairs
+                # fell minutes behind. Memory is always current; the file catches
+                # up at most every _PERSIST_INTERVAL_S. Unsaved candles stay in the
+                # in-memory tail (2.8 days even on 1m), and anything newer than the
+                # file is re-fetched from the exchange after a crash anyway.
+                if now - self._persisted_at.get(key, float("-inf")) >= _PERSIST_INTERVAL_S:
+                    self._persist_now(key, now)
+                else:
+                    self._dirty.add(key)
+                self._sweep_dirty(now)
             return changed
+
+    def _persist_now(self, key: OhlcvKey, now: float) -> None:
+        """Merge the series' in-memory tail into its file. Caller holds the lock."""
+        _exchange, pair, timeframe, candle_type = key
+        self._persisted_at[key] = now  # also paces retries after a failure
+        try:
+            written = self._disk.merge_into_file(pair, timeframe, candle_type, self._ohlcv[key])
+        except Exception:
+            logger.exception("Failed to persist OHLCV for %s to disk - still cached in memory", key)
+            self._dirty.add(key)
+            return
+        if written is None:  # file unreadable: keep holding, retry next interval
+            self._dirty.add(key)
+            return
+        self._ohlcv[key] = self._tail(written)
+        self._dirty.discard(key)
+
+    def _sweep_dirty(self, now: float) -> None:
+        """Write out series that went dirty and then stopped receiving candles, so
+        they don't wait for a next merge that may never come. Runs at most once a
+        minute and writes a bounded batch, so it never stalls a tick."""
+        if now - self._last_dirty_sweep < _DIRTY_SWEEP_INTERVAL_S:
+            return
+        self._last_dirty_sweep = now
+        due = [k for k in self._dirty if now - self._persisted_at.get(k, float("-inf")) >= _PERSIST_INTERVAL_S]
+        for key in due[:_DIRTY_SWEEP_BATCH]:
+            self._persist_now(key, now)
+
+    def flush(self) -> None:
+        """Write every series that has candles not yet on disk (shutdown)."""
+        if self._disk is None:
+            return
+        with self._lock:
+            pending = list(self._dirty)
+            now = time.monotonic()
+            for key in pending:
+                self._persist_now(key, now)
+        if pending:
+            logger.info("Flushed %d OHLCV series to disk", len(pending))
 
     def get_ohlcv(
         self, exchange: str, pair: str, timeframe: str, candle_type: str, limit: int | None = None
     ) -> DataFrame | None:
+        """The last `limit` candles (or the whole cached tail if no limit).
+
+        Serves from the bounded in-memory tail. A request for more candles than the
+        tail holds - only ever an explicit client `limit` - is read from disk for
+        that one response and not cached."""
         key: OhlcvKey = (exchange, pair, timeframe, candle_type)
         with self._lock:
             df = self._ohlcv.get(key)
-            if df is None and self._data_handler is not None:
-                try:
-                    df = self._data_handler.ohlcv_load(
-                        pair,
-                        timeframe=timeframe,
-                        candle_type=CandleType(candle_type),
-                        fill_missing=False,
-                        drop_incomplete=False,
-                        warn_no_data=False,
-                    )
-                except Exception:
-                    logger.exception("Failed to load on-disk OHLCV for %s", key)
-                    df = None
-                if df is not None and not df.empty:
+            full = None
+            if df is None and self._disk is not None:
+                full = self._disk.load(pair, timeframe, candle_type)
+                if full is not None and not full.empty:
+                    df = self._tail(full)
                     self._ohlcv[key] = df
+                else:
+                    df = full
             if df is None or df.empty:
                 return None
+            if limit and limit > len(df) and len(df) >= _CACHE_TAIL_CANDLES and self._disk is not None:
+                if full is None:
+                    full = self._disk.load(pair, timeframe, candle_type)
+                if full is not None and not full.empty:
+                    # Fold in anything merged in memory that hasn't reached the file.
+                    served = clean_ohlcv_dataframe(
+                        concat([full, df], axis=0),
+                        timeframe,
+                        pair,
+                        fill_missing=False,
+                        drop_incomplete=False,
+                    )
+                    return served.tail(limit)
             return df.tail(limit) if limit else df
 
     # -- Funding rate ---------------------------------------------------------
@@ -1368,7 +1673,10 @@ class TickerFetcher:
         # batch cap pinned at its floor. 5.0s is still fresh enough for
         # entry/exit pricing - Exchange.get_rate falls back to a direct
         # fetch_ticker() whenever this returns nothing - at 40% of the requests.
-        max_age_s: float = 5.0,
+        # Raised again to 10.0s: even dex-scoped, one Hyperliquid bulk refresh
+        # costs ~40 weight of a 1200/min per-IP budget shared by the whole
+        # fleet; 5s alone spent ~40% of it.
+        max_age_s: float = 10.0,
         # get_tickers()/fetch_ticker() are @retrier-wrapped with the default
         # API_RETRY_COUNT=4, whose backoff alone (calculate_backoff:
         # 1+2+5+10s) sums to ~18s before real per-request latency on top - so
@@ -1383,15 +1691,29 @@ class TickerFetcher:
         # worst-case retry chain; doesn't affect price freshness (max_age_s,
         # unchanged, still governs that) - only how long a caller is willing
         # to sit on an already-in-flight fetch before giving up on it.
-        fetch_timeout_s: float = 30.0,
+        # Lowered to 20s: at 30s it equalled DataServerClient's own response
+        # timeout, so a slow fetch made the client drop the whole connection.
+        fetch_timeout_s: float = 20.0,
+        # When a ticker up to this old is cached, wait at most stale_wait_s for
+        # the in-flight refresh and otherwise serve the cached one. Blocking a
+        # client's connection on exchange latency past its 30s timeout drops
+        # it, and every bot then falls back to a direct fetch_ticker() - adding
+        # exactly the load that made the fetch slow.
+        stale_max_age_s: float = 120.0,
+        stale_wait_s: float = 2.0,
     ) -> None:
         self.exchange = exchange
         self.cache = cache
         self.exchange_name = exchange_name
         self.max_age_s = max_age_s
         self.fetch_timeout_s = fetch_timeout_s
+        self.stale_max_age_s = stale_max_age_s
+        self.stale_wait_s = stale_wait_s
         self._lock = threading.Lock()
         self._inflight: dict[str, concurrent.futures.Future] = {}
+        # Pairs some client has asked for. Bulk fetches are scoped to these:
+        # an unscoped fetch on Hyperliquid pulls every builder dex.
+        self._wanted: set[str] = set()
         self._refresh_thread: threading.Thread | None = None
         self._refresh_stop = threading.Event()
         # Sized for real overlap (several DIFFERENT pairs' first-fetch-of-the-
@@ -1425,7 +1747,7 @@ class TickerFetcher:
                 "bulk fetch to warm all pairs per %.1fs window", exchange_name, max_age_s,
             )
 
-    def start_background_refresh(self, interval_s: float = 3.0) -> None:
+    def start_background_refresh(self, interval_s: float | None = None) -> None:
         """Proactively keep the ticker cache warm on this fixed server-side
         cadence, independent of whether/how often any bot asks - so `get()`'s
         cache-check very rarely misses and almost never has to fall through to
@@ -1438,7 +1760,20 @@ class TickerFetcher:
         exchanges keep relying on `get()`'s on-demand per-pair fetch, since
         proactively polling every pair on the whitelist regardless of whether
         it's actually held costs more than it saves there (see the on-demand
-        design note above this class)."""
+        design note above this class).
+
+        Defaults to `max_age_s` rather than its own independent constant - a
+        hardcoded 3.0s default here sat alongside `max_age_s`'s 5.0s default
+        for a long time, refreshing ~67% more often than the cache's own
+        freshness bound ever required (confirmed live: this was the single
+        largest consumer of the process's rate-limit budget - see max_age_s's
+        docstring above - and that waste was pure surplus, not needed to
+        satisfy max_age_s). Refreshing at exactly the freshness bound still
+        keeps `get()` from ever serving data older than max_age_s - a read
+        landing in the small gap right as a cycle turns over just falls
+        through to `get()`'s own on-demand (coalesced) fetch, same as today."""
+        if interval_s is None:
+            interval_s = self.max_age_s
         if not self._bulk or self._refresh_thread is not None:
             return
 
@@ -1462,12 +1797,26 @@ class TickerFetcher:
         refresh loop - deliberately bypasses the `_inflight`/Future dedup
         machinery in `_fetch_all` below, since there's only ever one caller
         (this loop) rather than N concurrent on-demand askers to coalesce."""
+        symbols = self._wanted_symbols()
+        if not symbols:
+            return
         try:
-            tickers = self.exchange.get_tickers()
+            tickers = self.exchange.get_tickers(symbols)
             for p, t in (tickers or {}).items():
                 self.cache.set_ticker(self.exchange_name, p, t)
         except Exception:
             logger.debug("Background ticker refresh failed", exc_info=True)
+
+    def _wanted_symbols(self) -> list[str]:
+        with self._lock:
+            wanted = list(self._wanted)
+        try:
+            markets = self.exchange.markets
+        except Exception:
+            return sorted(wanted)
+        # Unknown symbols make get_tickers() raise BadSymbol and force a full
+        # market reload.
+        return sorted(p for p in wanted if p in markets)
 
     def get(self, pair: str) -> dict | None:
         """Returns None on any failure/timeout - callers (the master's
@@ -1483,30 +1832,34 @@ class TickerFetcher:
         # requests for N different pairs collapse into a single upstream call.
         key = self._BULK_KEY if self._bulk else pair
         with self._lock:
+            self._wanted.add(pair)
             future = self._inflight.get(key)
             is_new = future is None
             if is_new:
                 future = self._executor.submit(self._fetch_all if self._bulk else self._fetch, pair)
                 self._inflight[key] = future
 
+        stale = self.cache.get_ticker(self.exchange_name, pair, self.stale_max_age_s)
         try:
-            result = future.result(timeout=self.fetch_timeout_s)
+            result = future.result(
+                timeout=self.stale_wait_s if stale is not None else self.fetch_timeout_s
+            )
         except concurrent.futures.TimeoutError:
             # Don't cancel - a slow-but-eventually-successful fetch still
             # warms the cache for the next request; this caller just isn't
             # going to wait for it themselves. Not logged as a warning: under
             # real exchange congestion this is an expected, routine outcome,
             # not something requiring attention every time it happens.
-            return None
+            return stale
         except Exception:
             logger.debug("On-demand ticker fetch failed for %s", pair, exc_info=True)
-            return None
+            return stale
         # Bulk fetches resolve to the whole tickers dict (one shared Future for
         # many waiting pairs), so each caller picks its own out of it. A missing
         # pair is returned as None, which callers already treat as "not cached".
         if self._bulk:
-            return (result or {}).get(pair)
-        return result
+            return (result or {}).get(pair) or stale
+        return result or stale
 
     # Single shared in-flight key for bulk mode - not a real pair name.
     _BULK_KEY = "__all_tickers__"
@@ -1514,7 +1867,8 @@ class TickerFetcher:
     def _fetch_all(self, _pair: str) -> dict | None:
         """One fetchTickers() call, cached for EVERY pair it returns."""
         try:
-            tickers = self.exchange.get_tickers()
+            symbols = self._wanted_symbols()
+            tickers = self.exchange.get_tickers(symbols) if symbols else {}
             for p, t in (tickers or {}).items():
                 self.cache.set_ticker(self.exchange_name, p, t)
             return tickers
@@ -2008,7 +2362,7 @@ class _ClientHandler(socketserver.BaseRequestHandler):
 #  Work distribution: split one exchange's pair list across the master's own
 #  local collection and any connected subservers, so no single collector ever
 #  exceeds that exchange's empirically safe per-batch pair count. Thresholds
-#  come from live probing (see VulcanTrader/ratelimit_probe.py) - the highest
+#  come from live probing (see VulcanTrader/util/ratelimit_probe.py) - the highest
 #  pair count that stayed rate-limit-free in a single refresh_latest_ohlcv()
 #  batch under this repo's standard ccxt_config (enableRateLimit + rateLimit:
 #  50ms). Conservative by construction: the last known-*good* count, not the
@@ -2103,10 +2457,8 @@ _EXCHANGE_RELOAD_BACKOFF_CAP_S = 300.0  # ceiling for DataCollector's reload bac
 # OHLCV every tick) on every Nth tick.
 _FUNDING_HISTORY_TICK_INTERVAL = 5
 
-# Same signal words VulcanTrader/ratelimit_probe.py looks for - kept as an
-# independent, smaller copy here (rather than imported) because
-# ratelimit_probe.py itself imports FROM this module, so importing back would
-# be circular.
+# Same signal words VulcanTrader/util/ratelimit_probe.py looks for - kept as an
+# independent, smaller copy here (rather than imported).
 _RATE_LIMIT_LOG_MARKERS = (
     "ratelimitexceeded", "rate limit", "too many requests", "429",
     "ddosprotection", "ddos protection",
@@ -2161,6 +2513,19 @@ _FUNDING_RATE_SWEEP_BUDGET_S = 20.0
 # ~0.13 MB and ~0.02s per pair - a ~27x reduction on both CPU and bandwidth.
 # Clients that genuinely need more can still pass an explicit larger `limit`.
 _SERVE_HISTORY_CANDLES = 2000
+
+# Candles per series DataCache keeps in memory (see DataCache._tail). Twice what
+# it serves by default, so a default get_ohlcv/push never needs the disk; the
+# full history stays on disk. At ~48 bytes a candle that's ~0.2 MB per series,
+# versus up to ~17 MB for one pair's complete 1m history.
+_CACHE_TAIL_CANDLES = 2 * _SERVE_HISTORY_CANDLES
+
+# DataCache writes each OHLCV series to disk at most this often (see
+# merge_ohlcv); a once-a-minute sweep writes up to _DIRTY_SWEEP_BATCH series that
+# went quiet with unsaved candles, and shutdown flushes the rest.
+_PERSIST_INTERVAL_S = 900.0
+_DIRTY_SWEEP_INTERVAL_S = 60.0
+_DIRTY_SWEEP_BATCH = 50
 
 # Per-client outbound queue depth (see _ClientConnection). Deep enough to absorb
 # a full push burst - one broadcast per pair at a candle close - without dropping
@@ -2249,10 +2614,10 @@ def _volume_sorted_pairs(pairs: list[str], exchange: Any) -> list[str]:
 
     Bounded to `_TICKER_SORT_TIMEOUT_S`: this ordering is a nice-to-have
     (which pairs get refreshed FIRST within the rotation), not something OHLCV
-    collection should ever wait on. Hyperliquid's fetch_tickers() always
-    returns EVERY market (768+) regardless of a `symbols` filter - there's no
-    cheaper, scoped endpoint on their side - so under real congestion this one
-    call can itself take minutes (confirmed live: ~4 minutes, TWICE, on two
+    collection should ever wait on. ccxt's Hyperliquid fetch_tickers() pulls
+    every market on every dex regardless of a `symbols` filter (our Hyperliquid
+    subclass now scopes it per dex), so under real congestion this one
+    call could itself take minutes (confirmed live: ~4 minutes, TWICE, on two
     separate sessions hours apart), during which the master was assigned zero
     pairs and collected zero candles. Every second spent waiting here is a
     second not spent fetching anything. Runs the fetch on a background
@@ -2276,7 +2641,15 @@ def _volume_sorted_pairs(pairs: list[str], exchange: Any) -> list[str]:
         # never actually stuck - just needlessly fetching tickers for zero
         # pairs before it could bind its listening socket.
         return []
-    future = _ticker_sort_executor.submit(exchange.get_tickers, cached=True)
+    # Scoped to the pairs being sorted - unscoped, Hyperliquid fetches every
+    # builder dex. Unknown symbols would raise BadSymbol and force a reload.
+    try:
+        known = [p for p in pairs if p in exchange.markets]
+    except Exception:
+        known = list(pairs)
+    if not known:
+        return sorted(pairs)
+    future = _ticker_sort_executor.submit(exchange.get_tickers, known, cached=True)
     try:
         tickers = future.result(timeout=_TICKER_SORT_TIMEOUT_S)
     except concurrent.futures.TimeoutError:
@@ -3269,7 +3642,7 @@ class DataServerClient:
         finally:
             self._drop(sock)
 
-    def _await_response(self, sock: socket.socket, timeout: float = 30.0) -> dict | None:
+    def _await_response(self, sock: socket.socket, timeout: float = 60.0) -> dict | None:
         """Raised from 10.0s -> 30.0s after observing a live multi-bot run:
         even with register_interest's rebalance work moved off the handler
         thread (see ClientInterestRegistry.__init__), a master juggling
@@ -3282,7 +3655,13 @@ class DataServerClient:
         positive from a timeout that was tighter than this server's real
         worst-case latency under load, not an actual dead connection. 30s
         still catches a genuinely wedged connection; it just stops firing on
-        ordinary load spikes."""
+        ordinary load spikes.
+
+        Raised again to 60s: the master's on-demand ticker fetch could wait
+        up to 30s itself, so a busy minute dropped the shared connection, every
+        bot fell back to direct fetch_ticker() calls, and that extra load kept
+        the master slow - a reconnect loop. Must stay above TickerFetcher's
+        fetch_timeout_s."""
         try:
             return self._response_queue.get(timeout=timeout)
         except queue.Empty:
@@ -3572,6 +3951,10 @@ def _expand_minimal_config(minimal: dict[str, Any], args: Any) -> Config:
             "use_public_trades": bool(minimal.get("orderflow", False)),
             "pair_whitelist": starting_pairs,
             "pair_blacklist": [],
+            # Stream candles over websocket (refresh_latest_ohlcv serves them
+            # from the watch cache) - REST polling every pair/timeframe can't
+            # fit e.g. Hyperliquid's per-IP weight budget.
+            "ws_outside_trade_modes": True,
         },
         "pairlists": [{"method": "StaticPairList"}],
         # dynamic_expand_pairlist (used by DataCollector to fall back to the
@@ -3596,6 +3979,63 @@ def _expand_minimal_config(minimal: dict[str, Any], args: Any) -> Config:
     check_exchange(config, check_for_bad=False)
 
     return config
+
+
+# Shutdown steps get this long before being abandoned (see _shutdown_step), and
+# leftover non-daemon threads get _EXIT_THREAD_GRACE_S before a forced exit.
+_SHUTDOWN_STEP_TIMEOUT_S = 20.0
+_EXIT_THREAD_GRACE_S = 15.0
+
+
+def _thread_stack(thread: threading.Thread) -> str:
+    frame = sys._current_frames().get(thread.ident) if thread.ident is not None else None
+    return "".join(traceback.format_stack(frame)) if frame is not None else "  (no frame)\n"
+
+
+def _shutdown_step(fn: Callable[[], None], label: str, timeout_s: float = _SHUTDOWN_STEP_TIMEOUT_S) -> None:
+    """Run one shutdown step without letting it hang the process.
+
+    Ctrl-C/SIGTERM used to leave the master hung for good (needed SIGKILL every
+    time, 2026-11-11): a cleanup call blocked forever - most likely
+    Exchange.close()'s un-timed run_until_complete on the ccxt sessions - so the
+    listeners were never stopped either and bots kept getting served for minutes.
+    Each step now runs on its own daemon thread; one that overruns is logged with
+    the exact stack it is stuck at, abandoned, and the rest of shutdown proceeds."""
+
+    def _run() -> None:
+        try:
+            fn()
+        except Exception:
+            logger.exception("Shutdown step %s failed", label)
+
+    t = threading.Thread(target=_run, name=f"shutdown-{label}", daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        logger.warning(
+            "Shutdown step %s did not finish within %.0fs - continuing without it. It is "
+            "stuck at:\n%s", label, timeout_s, _thread_stack(t),
+        )
+
+
+def _exit_if_threads_linger(grace_s: float = _EXIT_THREAD_GRACE_S) -> None:
+    """Interpreter exit joins every non-daemon thread (thread-pool workers
+    included), so one blocked in a network call would hang exit indefinitely.
+    Give them `grace_s`, then log where any are stuck and exit anyway. By this
+    point collection and the listeners are stopped, so nothing is mid-write."""
+    deadline = time.monotonic() + grace_s
+    main = threading.main_thread()
+    for t in threading.enumerate():
+        if t is not main and not t.daemon:
+            t.join(max(0.0, deadline - time.monotonic()))
+    stuck = [t for t in threading.enumerate() if t is not main and not t.daemon and t.is_alive()]
+    if not stuck:
+        return
+    for t in stuck:
+        logger.warning("Thread %r still running at exit, stuck at:\n%s", t.name, _thread_stack(t))
+    logger.warning("Forcing exit: %d thread(s) would otherwise block shutdown", len(stuck))
+    logging.shutdown()
+    os._exit(0)
 
 
 def _supervised_run(
@@ -3626,7 +4066,7 @@ def _run_standalone(config: Config, args: Any, stop_event: threading.Event) -> N
     try:
         collector.run_forever(poll_interval=args.poll_interval, stop_event=stop_event)
     finally:
-        collector.close()
+        _shutdown_step(collector.close, "collector.close")
 
 
 def _run_master(config: Config, args: Any, stop_event: threading.Event) -> None:
@@ -3694,7 +4134,7 @@ def _run_master(config: Config, args: Any, stop_event: threading.Event) -> None:
     # connected, and rebalance every time a subserver joins or leaves. Each
     # worker's own DataCollector (below) rotates through its share in batches
     # capped at this exchange's empirically safe pair count (see
-    # EXCHANGE_MAX_SAFE_PAIRS / VulcanTrader/ratelimit_probe.py) - with zero
+    # EXCHANGE_MAX_SAFE_PAIRS / VulcanTrader/util/ratelimit_probe.py) - with zero
     # subservers connected, the master just rotates through the whole list
     # itself on a slower cadence rather than dropping the excess.
     max_pairs = args.max_pairs_per_worker or max_safe_pairs_for(exchange_name)
@@ -3763,9 +4203,12 @@ def _run_master(config: Config, args: Any, stop_event: threading.Event) -> None:
     try:
         collector.run_forever(poll_interval=args.poll_interval, stop_event=stop_event)
     finally:
-        ticker_fetcher.stop_background_refresh()
-        collector.close()
-        server.stop()
+        _shutdown_step(ticker_fetcher.stop_background_refresh, "ticker_fetcher.stop")
+        _shutdown_step(collector.close, "collector.close")
+        _shutdown_step(server.stop, "server.stop")
+        # Candles held back by throttled persistence. Generous limit: on a cold
+        # cache this can be several hundred file rewrites.
+        _shutdown_step(cache.flush, "cache.flush", timeout_s=300.0)
 
 
 def _run_subserver(config: Config, args: Any, stop_event: threading.Event) -> None:
@@ -3793,8 +4236,8 @@ def _run_subserver(config: Config, args: Any, stop_event: threading.Event) -> No
     try:
         collector.run_forever(poll_interval=args.poll_interval, stop_event=stop_event)
     finally:
-        collector.close()
-        forwarder.stop()
+        _shutdown_step(collector.close, "collector.close")
+        _shutdown_step(forwarder.stop, "forwarder.stop")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3843,7 +4286,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Override the per-worker pair cap used to auto-distribute pairs across "
         "connected subservers (master mode). Defaults to the empirically safe count "
-        "for this exchange from VulcanTrader/ratelimit_probe.py (EXCHANGE_MAX_SAFE_PAIRS), "
+        "for this exchange from VulcanTrader/util/ratelimit_probe.py (EXCHANGE_MAX_SAFE_PAIRS), "
         f"or {DEFAULT_MAX_SAFE_PAIRS} if the exchange isn't in that table.",
     )
     # subserver-only - falls back to the config file's "master_host" (see
@@ -3914,6 +4357,8 @@ def main(argv: list[str] | None = None) -> int:
         "subserver": lambda se: _run_subserver(config, args, se),
     }
     _supervised_run(runners[args.mode], stop_event, args.mode)
+    logger.info("Data server stopped.")
+    _exit_if_threads_linger()
     return 0
 
 

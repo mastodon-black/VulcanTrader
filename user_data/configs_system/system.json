@@ -1,5 +1,36 @@
 {
+    "ninjatrader": {
+        "auto_start": true,
+        "account": "Sim101",
+        "host": "127.0.0.1",
+        "port": 8755,
+        "contract_months": {
+            "6A": "12-26",
+            "6J": "12-26",
+            "6M": "12-26",
+            "CL": "12-26",
+            "ES": "12-26",
+            "GC": "12-26",
+            "HG": "12-26",
+            "MBT": "12-26",
+            "MCL": "12-26",
+            "MET": "12-26",
+            "MHG": "12-26",
+            "MNQ": "12-26",
+            "MYM": "12-26",
+            "NQ": "12-26",
+            "PL": "01-27",
+            "SI": "12-26",
+            "SIL": "12-26",
+            "YM": "12-26",
+            "ZC": "12-26",
+            "ZL": "12-26",
+            "ZS": "12-26",
+            "ZW": "12-26"
+        }
+    },
     "single_process_mode": true,
+    "fleet_worker_processes": 4,
     "auto_start_data_server": true,
     "data_server_ip": "127.0.0.1",
     "data_server_port": 8720,
@@ -15,8 +46,8 @@
         "password": "test"
     },
     "discord": {
-        "enabled": false,
-        "webhook_url": "",
+        "enabled": true,
+        "webhook_url": "h",
         "bot_token": "",
         "allowed_user_ids": []
     },
@@ -26,3 +57,4 @@
         "chat_id": ""
     }
 }
+

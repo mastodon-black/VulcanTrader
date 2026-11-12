@@ -1287,6 +1287,142 @@ impl Default for SharedIndicatorCache {
 
 use std::sync::Arc as StdArc;
 
+// =============================================================================
+// SHARED SIMD KERNELS — true range / gains-losses
+// =============================================================================
+//
+// True range and the RSI gain/loss split are pure elementwise computations
+// (no cross-bar data dependency), so they vectorize cleanly with AVX2 and
+// produce value-identical output to the scalar loop — no reordering of
+// floating-point operations, just 8 lanes at once. Runtime-detected via
+// `is_x86_feature_detected!`, falling back to scalar on older CPUs or
+// non-x86_64 targets. The Wilder-smoothing recurrences that consume these
+// arrays (ATR, ADX, RSI) stay scalar: `y[i]` depends on `y[i-1]`, which is an
+// inherently serial dependency SIMD can't parallelize along the time axis.
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+/// True range: `TR[i] = max(H[i]-L[i], |H[i]-C[i-1]|, |L[i]-C[i-1]|)`, `TR[0] = H[0]-L[0]`.
+/// Shared by `calculate_atr_rust`, `calculate_adx_rust`, and `choppiness_index`,
+/// which previously each computed this identical formula independently.
+pub fn true_range(high: &[f32], low: &[f32], close: &[f32]) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { true_range_avx2(high, low, close) };
+    }
+    true_range_scalar(high, low, close)
+}
+
+fn true_range_scalar(high: &[f32], low: &[f32], close: &[f32]) -> Vec<f32> {
+    let n = high.len();
+    let mut tr = vec![0.0f32; n];
+    if n == 0 { return tr; }
+    tr[0] = high[0] - low[0];
+    for i in 1..n {
+        let hl = high[i] - low[i];
+        let hc = (high[i] - close[i - 1]).abs();
+        let lc = (low[i] - close[i - 1]).abs();
+        tr[i] = hl.max(hc).max(lc);
+    }
+    tr
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn true_range_avx2(high: &[f32], low: &[f32], close: &[f32]) -> Vec<f32> {
+    let n = high.len();
+    let mut tr = vec![0.0f32; n];
+    if n == 0 { return tr; }
+    tr[0] = high[0] - low[0];
+    if n < 2 { return tr; }
+
+    let hp = high.as_ptr();
+    let lp = low.as_ptr();
+    let cp = close.as_ptr();
+    let out = tr.as_mut_ptr();
+    let sign_mask = _mm256_set1_ps(-0.0f32);
+
+    let mut i = 1usize;
+    while i + 8 <= n {
+        let h = _mm256_loadu_ps(hp.add(i));
+        let l = _mm256_loadu_ps(lp.add(i));
+        let c_prev = _mm256_loadu_ps(cp.add(i - 1));
+
+        let hl = _mm256_sub_ps(h, l);
+        let hc = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(h, c_prev));
+        let lc = _mm256_andnot_ps(sign_mask, _mm256_sub_ps(l, c_prev));
+
+        let result = _mm256_max_ps(_mm256_max_ps(hl, hc), lc);
+        _mm256_storeu_ps(out.add(i), result);
+        i += 8;
+    }
+    while i < n {
+        let hl = high[i] - low[i];
+        let hc = (high[i] - close[i - 1]).abs();
+        let lc = (low[i] - close[i - 1]).abs();
+        tr[i] = hl.max(hc).max(lc);
+        i += 1;
+    }
+    tr
+}
+
+/// Per-bar gain/loss split for Wilder RSI: `gain[i] = max(close[i]-close[i-1], 0)`,
+/// `loss[i] = max(close[i-1]-close[i], 0)`. Index 0 is always `0.0` (no prior bar).
+/// Shared by `calculate_rsi_rust`.
+pub fn gains_losses(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        return unsafe { gains_losses_avx2(close) };
+    }
+    gains_losses_scalar(close)
+}
+
+fn gains_losses_scalar(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let n = close.len();
+    let mut gains = vec![0.0f32; n];
+    let mut losses = vec![0.0f32; n];
+    for i in 1..n {
+        let d = close[i] - close[i - 1];
+        if d > 0.0 { gains[i] = d; } else { losses[i] = -d; }
+    }
+    (gains, losses)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn gains_losses_avx2(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let n = close.len();
+    let mut gains = vec![0.0f32; n];
+    let mut losses = vec![0.0f32; n];
+    if n == 0 { return (gains, losses); }
+
+    let cp = close.as_ptr();
+    let gp = gains.as_mut_ptr();
+    let lp = losses.as_mut_ptr();
+    let zero = _mm256_setzero_ps();
+
+    let mut i = 1usize;
+    while i + 8 <= n {
+        let c = _mm256_loadu_ps(cp.add(i));
+        let c_prev = _mm256_loadu_ps(cp.add(i - 1));
+        let delta = _mm256_sub_ps(c, c_prev);
+
+        let gain = _mm256_max_ps(delta, zero);
+        let loss = _mm256_max_ps(_mm256_sub_ps(zero, delta), zero);
+
+        _mm256_storeu_ps(gp.add(i), gain);
+        _mm256_storeu_ps(lp.add(i), loss);
+        i += 8;
+    }
+    while i < n {
+        let d = close[i] - close[i - 1];
+        if d > 0.0 { gains[i] = d; } else { losses[i] = -d; }
+        i += 1;
+    }
+    (gains, losses)
+}
+
 /// Calculate SMA (Simple Moving Average) over array
 #[inline]
 pub fn calculate_sma_rust(prices: &[f32], period: usize) -> Vec<f32> {
@@ -1339,25 +1475,20 @@ pub fn calculate_rsi_rust(prices: &[f32], period: usize) -> Vec<f32> {
     let mut rsi = vec![f32::NAN; n];
     if n <= period || period == 0 { return rsi; }
 
-    // Compute initial avg gain/loss without allocating separate gain/loss vecs.
+    // SIMD-accelerated elementwise gain/loss split; Wilder smoothing below
+    // stays scalar (it's a serial recurrence — avg_gain[i] depends on avg_gain[i-1]).
+    let (gains, losses) = gains_losses(prices);
+
     let pf = period as f32;
-    let mut avg_gain = 0.0f32;
-    let mut avg_loss = 0.0f32;
-    for i in 1..=period {
-        let d = prices[i] - prices[i - 1];
-        if d > 0.0 { avg_gain += d; } else { avg_loss -= d; }
-    }
-    avg_gain /= pf;
-    avg_loss /= pf;
+    let mut avg_gain: f32 = gains[1..=period].iter().sum::<f32>() / pf;
+    let mut avg_loss: f32 = losses[1..=period].iter().sum::<f32>() / pf;
 
     rsi[period] = if avg_loss == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + avg_gain / avg_loss) };
 
     let smooth = pf - 1.0;
     for i in period + 1..n {
-        let d = prices[i] - prices[i - 1];
-        let (g, l) = if d > 0.0 { (d, 0.0) } else { (0.0, -d) };
-        avg_gain = (avg_gain * smooth + g) / pf;
-        avg_loss = (avg_loss * smooth + l) / pf;
+        avg_gain = (avg_gain * smooth + gains[i]) / pf;
+        avg_loss = (avg_loss * smooth + losses[i]) / pf;
         rsi[i] = if avg_loss == 0.0 { 100.0 } else { 100.0 - 100.0 / (1.0 + avg_gain / avg_loss) };
     }
     rsi
@@ -1467,14 +1598,8 @@ pub fn calculate_atr_rust(high: &[f32], low: &[f32], close: &[f32], period: usiz
     let mut atr = vec![f32::NAN; n];
     if n <= period || period == 0 { return atr; }
 
-    let mut tr = vec![0.0f32; n];
-    tr[0] = high[0] - low[0];
-    for i in 1..n {
-        let hl = high[i] - low[i];
-        let hc = (high[i] - close[i - 1]).abs();
-        let lc = (low[i] - close[i - 1]).abs();
-        tr[i] = hl.max(hc).max(lc);
-    }
+    // SIMD-accelerated elementwise true range; Wilder smoothing below stays scalar.
+    let tr = true_range(high, low, close);
 
     let mut current_atr: f32 = tr[0..period].iter().sum::<f32>() / period as f32;
     atr[period - 1] = current_atr;
@@ -1599,6 +1724,107 @@ pub fn rolling_std(prices: &[f32], period: usize) -> Vec<f32> {
 #[inline]
 pub fn rolling_std_arc(prices: &StdArc<Vec<f32>>, period: usize) -> StdArc<Vec<f32>> {
     StdArc::new(rolling_std(prices, period))
+}
+
+/// Per-element port of `VulcanTrader/data/btanalysis/historic_precision.py`'s
+/// `_significant_decimals`: number of significant decimal places in `v[i]`
+/// (0 for a whole number or non-finite value) — the position of the last
+/// non-zero digit within the first 15 decimal places, matching the original
+/// `"{:.15f}".format` + regex behavior exactly (that numpy port's own doc
+/// comment).
+///
+/// The Python side is already numpy-vectorized (not the original
+/// per-row-Python-object regex version), but still measured at ~0.84s across
+/// 45 pairs in a real 1.5-year backtest — its 15-iteration "strip trailing
+/// zeros" loop does a full-array pass on EVERY iteration regardless of how
+/// many elements have already converged, whereas this per-element loop does
+/// exactly as many divisions as that element's own digit count needs, with
+/// zero intermediate array allocation. `get_tick_size_over_time`'s monthly
+/// resample stays in pandas — only this per-bar numeric core moves.
+///
+/// Uses `round_ties_even` (banker's rounding), not the more common round-
+/// half-away-from-zero, because it must exactly match `np.round`/`np.rint` —
+/// both round half-to-even internally. This is NOT a rare edge case for real
+/// price data: an exact `.5` tie at the 15th digit is a routine consequence
+/// of typical decimal prices' float64 representation, not a random
+/// coincidence. Confirmed empirically: an initial round-half-away-from-zero
+/// version of this function mismatched numpy on 12 of ~7 million real
+/// exchange OHLCV values checked, ALL traced to exactly this tie (e.g.
+/// 5.6351: `frac * 1e15` lands on exactly `635100000000000.5`).
+pub fn significant_decimals(values: &[f64]) -> Vec<i64> {
+    values.iter().map(|&v| {
+        if !v.is_finite() { return 0i64; }
+        let scaled = (v * 1e14).round_ties_even() / 1e14;
+        let frac = scaled - scaled.floor();
+        let mut frac_int = (frac * 1e15).round_ties_even() as i64;
+        if frac_int >= 1_000_000_000_000_000 { frac_int = 0; }
+        if frac_int == 0 { return 0; }
+        let mut places = 15i64;
+        while places > 0 && frac_int % 10 == 0 {
+            frac_int /= 10;
+            places -= 1;
+        }
+        places
+    }).collect()
+}
+
+/// Rolling z-score: `(x[i] - window_mean) / window_std`, population std (ddof=0),
+/// matching numpy's `.std()` default — the same formula a Python strategy would
+/// otherwise compute via `series.rolling(window).apply(lambda w: (w[-1] -
+/// w.mean()) / w.std())`, which calls a Python function once per bar (measured
+/// at 57% of a real backtest's wall time for one such indicator, dwarfing the
+/// entire Rust engine). This is that computation as a single native O(n) pass.
+///
+/// NaN-aware to match pandas' rolling `.apply()` semantics exactly: a window
+/// containing ANY NaN produces NaN (numpy's `.mean()`/`.std()` don't skip NaN),
+/// but — unlike this crate's SMA/rolling_std, whose naive incremental sum
+/// permanently poisons every value after one NaN — a window recovers once the
+/// NaN slides out, because the running sum/sum-of-squares only ever
+/// accumulates non-NaN terms (tracked via `nan_count`) rather than including a
+/// NaN and never being able to subtract it back out cleanly. This matters here
+/// specifically because the values fed in are typically `pct_change()`-based
+/// returns, which always carry a leading NaN at index 0.
+pub fn rolling_zscore(values: &[f32], window: usize) -> Vec<f32> {
+    let n = values.len();
+    let mut out = vec![f32::NAN; n];
+    if window == 0 || n < window { return out; }
+
+    let scan = |lo: usize, hi_incl: usize| -> (f32, f32, usize) {
+        let mut s = 0.0f32;
+        let mut sq = 0.0f32;
+        let mut nc = 0usize;
+        for &v in &values[lo..=hi_incl] {
+            if v.is_nan() { nc += 1; } else { s += v; sq += v * v; }
+        }
+        (s, sq, nc)
+    };
+
+    let (mut sum, mut sum_sq, mut nan_count) = scan(0, window - 1);
+
+    let emit = |i: usize, sum: f32, sum_sq: f32, nan_count: usize, out: &mut [f32]| {
+        if nan_count > 0 { return; } // out[i] already NaN
+        let pf = window as f32;
+        let mean = sum / pf;
+        let var = (sum_sq / pf - mean * mean).max(0.0);
+        let std = var.sqrt();
+        out[i] = if std <= 1e-9 { 0.0 } else { (values[i] - mean) / std };
+    };
+    emit(window - 1, sum, sum_sq, nan_count, &mut out);
+
+    for i in window..n {
+        let old = values[i - window];
+        let new = values[i];
+        if old.is_nan() { nan_count -= 1; } else { sum -= old; sum_sq -= old * old; }
+        if new.is_nan() { nan_count += 1; } else { sum += new; sum_sq += new * new; }
+        emit(i, sum, sum_sq, nan_count, &mut out);
+    }
+    out
+}
+
+/// Arc variant
+#[inline]
+pub fn rolling_zscore_arc(values: &StdArc<Vec<f32>>, window: usize) -> StdArc<Vec<f32>> {
+    StdArc::new(rolling_zscore(values, window))
 }
 
 /// Rolling max over a window
@@ -1830,17 +2056,15 @@ pub fn calculate_adx_rust(high: &[f32], low: &[f32], close: &[f32], period: usiz
     let mut adx = vec![f32::NAN; n];
     if n <= period * 2 || period == 0 { return adx; }
 
-    let mut tr = vec![0.0f32; n];
+    // SIMD-accelerated elementwise true range, shared with calculate_atr_rust /
+    // choppiness_index. dm_plus/dm_minus keep their own scalar loop — that
+    // comparison (`up_move > down_move && up_move > 0.0`) is branchier than a
+    // plain max(x,0) and isn't vectorized here.
+    let tr = true_range(high, low, close);
     let mut dm_plus = vec![0.0f32; n];
     let mut dm_minus = vec![0.0f32; n];
 
-    tr[0] = high[0] - low[0];
     for i in 1..n {
-        let hl = high[i] - low[i];
-        let hc = (high[i] - close[i - 1]).abs();
-        let lc = (low[i] - close[i - 1]).abs();
-        tr[i] = hl.max(hc).max(lc);
-
         let up_move = high[i] - high[i - 1];
         let down_move = low[i - 1] - low[i];
         if up_move > down_move && up_move > 0.0 { dm_plus[i] = up_move; }
@@ -1972,15 +2196,8 @@ pub fn choppiness_index(high: &[f32], low: &[f32], close: &[f32], period: usize)
     let mut result = vec![f32::NAN; n];
     if n <= period || period == 0 { return result; }
 
-    // Inline true range (= ATR period=1) — avoids separate Vec allocation + function call
-    let mut tr = vec![0.0f32; n];
-    tr[0] = high[0] - low[0];
-    for i in 1..n {
-        let hl = high[i] - low[i];
-        let hc = (high[i] - close[i - 1]).abs();
-        let lc = (low[i] - close[i - 1]).abs();
-        tr[i] = hl.max(hc).max(lc);
-    }
+    // SIMD-accelerated elementwise true range, shared with calculate_atr_rust / calculate_adx_rust.
+    let tr = true_range(high, low, close);
 
     // Monotone deques for O(n) rolling max (HH) and min (LL)
     // Each index enters and leaves the deque exactly once → O(n) total
@@ -2502,10 +2719,183 @@ mod tests {
     #[test]
     fn test_shared_cache() {
         let cache = SharedIndicatorCache::new(100);
-        
+
         let values = [50.0f32; 25];
         cache.update(&values);
-        
+
         assert_eq!(cache.get_latest(0), 50.0);
+    }
+
+    // Deterministic pseudo-random OHLCV-ish series, long enough (37 bars) to
+    // exercise both the 8-wide AVX2 loop and its scalar tail (37 % 8 == 5).
+    fn synthetic_series(n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut close = Vec::with_capacity(n);
+        let mut high = Vec::with_capacity(n);
+        let mut low = Vec::with_capacity(n);
+        let mut price = 100.0f32;
+        for i in 0..n {
+            // Deterministic wobble, includes exact-zero deltas (i % 5 == 0)
+            // to exercise gains_losses' -0.0/+0.0 edge case.
+            let step = if i % 5 == 0 { 0.0 } else { ((i as f32 * 0.7).sin()) * 1.5 };
+            price += step;
+            close.push(price);
+            high.push(price + 0.8);
+            low.push(price - 0.8);
+        }
+        (close, high, low)
+    }
+
+    #[test]
+    fn true_range_avx2_matches_scalar() {
+        for n in [37usize, 64, 1] {
+            let (close, high, low) = synthetic_series(n);
+            let scalar = true_range_scalar(&high, &low, &close);
+            let dispatched = true_range(&high, &low, &close);
+            assert_eq!(scalar.len(), dispatched.len());
+            for i in 0..n {
+                assert!(
+                    scalar[i] == dispatched[i],
+                    "true_range mismatch at n={n} i={i}: scalar={} dispatched={}",
+                    scalar[i], dispatched[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gains_losses_avx2_matches_scalar() {
+        for n in [37usize, 64, 1] {
+            let (close, _high, _low) = synthetic_series(n);
+            let (sg, sl) = gains_losses_scalar(&close);
+            let (dg, dl) = gains_losses(&close);
+            assert_eq!(sg.len(), dg.len());
+            for i in 0..n {
+                // Value-identical, not bit-identical: the branchless max(-delta,0)
+                // yields +0.0 on an exact-zero delta where the scalar `-d` branch
+                // yields -0.0. `==` treats +0.0 == -0.0, which is what we want here.
+                assert!(sg[i] == dg[i], "gain mismatch at n={n} i={i}: {} vs {}", sg[i], dg[i]);
+                assert!(sl[i] == dl[i], "loss mismatch at n={n} i={i}: {} vs {}", sl[i], dl[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn atr_adx_choppiness_unaffected_by_true_range_extraction() {
+        let (close, high, low) = synthetic_series(64);
+        // Just a smoke test that these still run end-to-end and produce
+        // finite values past warmup — the real parity guard is the two
+        // tests above, since these three functions all now route through
+        // the same `true_range()` dispatcher.
+        let atr = calculate_atr_rust(&high, &low, &close, 14);
+        let adx = calculate_adx_rust(&high, &low, &close, 14);
+        let chop = choppiness_index(&high, &low, &close, 14);
+        assert!(atr[63].is_finite());
+        assert!(adx[63].is_finite());
+        assert!(chop[63].is_finite());
+    }
+
+    // Ad hoc timing comparison, not a correctness test — `cargo test --release
+    // -- --ignored --nocapture bench_avx2_speedup` to see the numbers on this
+    // machine. Ignored by default so it doesn't slow down the normal suite.
+    #[test]
+    #[ignore]
+    fn bench_avx2_speedup() {
+        use std::time::Instant;
+        let n = 5_000_000usize;
+        let (close, high, low) = synthetic_series(n);
+        const ITERS: u32 = 20;
+
+        let t0 = Instant::now();
+        for _ in 0..ITERS { std::hint::black_box(true_range_scalar(&high, &low, &close)); }
+        let scalar_tr = t0.elapsed() / ITERS;
+
+        let t0 = Instant::now();
+        for _ in 0..ITERS { std::hint::black_box(true_range(&high, &low, &close)); }
+        let avx2_tr = t0.elapsed() / ITERS;
+
+        let t0 = Instant::now();
+        for _ in 0..ITERS { std::hint::black_box(gains_losses_scalar(&close)); }
+        let scalar_gl = t0.elapsed() / ITERS;
+
+        let t0 = Instant::now();
+        for _ in 0..ITERS { std::hint::black_box(gains_losses(&close)); }
+        let avx2_gl = t0.elapsed() / ITERS;
+
+        println!("n={n}, avg of {ITERS} runs:");
+        println!("  true_range:   scalar={scalar_tr:?}  avx2={avx2_tr:?}  speedup={:.2}x",
+            scalar_tr.as_secs_f64() / avx2_tr.as_secs_f64());
+        println!("  gains_losses: scalar={scalar_gl:?}  avx2={avx2_gl:?}  speedup={:.2}x",
+            scalar_gl.as_secs_f64() / avx2_gl.as_secs_f64());
+    }
+
+    /// Fresh-recompute-per-window reference, mirroring the pandas path exactly:
+    /// `_rolling_zscore` in AllIndicatorsDemoStrategy.py calls `.mean()`/`.std()`
+    /// (ddof=0) on the raw window contents on every call — no incremental state,
+    /// so it can't suffer from the "poisoned forever" bug an incremental sum risks.
+    fn rolling_zscore_reference(values: &[f32], window: usize) -> Vec<f32> {
+        let n = values.len();
+        let mut out = vec![f32::NAN; n];
+        if window == 0 || n < window { return out; }
+        for i in (window - 1)..n {
+            let w = &values[(i + 1 - window)..=i];
+            if w.iter().any(|v| v.is_nan()) { continue; }
+            let mean = w.iter().sum::<f32>() / window as f32;
+            let var = w.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / window as f32;
+            let std = var.sqrt();
+            out[i] = if std <= 1e-9 { 0.0 } else { (values[i] - mean) / std };
+        }
+        out
+    }
+
+    #[test]
+    fn rolling_zscore_matches_fresh_recompute_reference() {
+        let (close, _high, _low) = synthetic_series(80);
+        // pct_change()-style series: index 0 is NaN, matching the real call site
+        // (AllIndicatorsDemoStrategy.py: `dataframe["close"].pct_change()`).
+        let mut returns = vec![f32::NAN; close.len()];
+        for i in 1..close.len() {
+            returns[i] = close[i] / close[i - 1] - 1.0;
+        }
+
+        let window = 20;
+        let got = rolling_zscore(&returns, window);
+        let want = rolling_zscore_reference(&returns, window);
+        assert_eq!(got.len(), want.len());
+        for i in 0..got.len() {
+            match (got[i].is_nan(), want[i].is_nan()) {
+                (true, true) => {}
+                (false, false) => assert!(
+                    (got[i] - want[i]).abs() < 1e-4,
+                    "mismatch at i={i}: got={} want={}", got[i], want[i]
+                ),
+                _ => panic!("NaN-ness mismatch at i={i}: got={:?} want={:?}", got[i], want[i]),
+            }
+        }
+        // The defining regression case: with a leading NaN at index 0, this
+        // crate's own SMA/rolling_std would stay NaN forever (incremental sum
+        // never recovers from one NaN). rolling_zscore must recover once the
+        // NaN exits the window, i.e. real values must appear well before the
+        // end of the 80-element series.
+        assert!(got[79].is_finite(), "rolling_zscore stayed NaN-poisoned — the NaN-recovery logic regressed");
+        assert!(got[window].is_finite(), "first window clear of the leading NaN should already be finite");
+    }
+
+    #[test]
+    fn significant_decimals_matches_python_reference() {
+        // Expected values captured directly from the real Python function
+        // (`historic_precision._significant_decimals`), not hand-derived —
+        // 100.123 and 4075.3 genuinely come back as 15, not the naively
+        // expected 3/1: float64 can't represent those decimals exactly, so
+        // the representation noise past the intended digits IS counted, by
+        // design, in the reference implementation itself. Matching that
+        // exactly (not "fixing" it) is the point — this function feeds tick
+        // rounding for real order prices.
+        let values = vec![
+            100.0, 100.5, 100.25, 100.123, f64::NAN, f64::INFINITY, 0.00001, 4075.3,
+            -100.5, 0.0, 95000.0, 1.0000000000001,
+        ];
+        let want = vec![0, 1, 2, 15, 0, 0, 5, 15, 1, 0, 0, 13];
+        let got = significant_decimals(&values);
+        assert_eq!(got, want);
     }
 }

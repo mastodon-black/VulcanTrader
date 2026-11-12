@@ -17,7 +17,13 @@ from VulcanTrader.util.exceptions import (
     TemporaryError,
 )
 from VulcanTrader.exchange import Exchange
-from VulcanTrader.exchange.exchange_types import CcxtOrder, OHLCVResponse, TraderHas
+from VulcanTrader.exchange.exchange_types import (
+    CcxtOrder,
+    OHLCVResponse,
+    Ticker,
+    Tickers,
+    TraderHas,
+)
 from VulcanTrader.util.datetime_helpers import dt_from_ts, dt_ts
 from VulcanTrader.exchange.common import retrier
 
@@ -40,6 +46,9 @@ class Hyperliquid(Exchange):
         "marketOrderRequiresPrice": True,
         "download_data_parallel_quick": False,
         "ws_enabled": True,
+        # candleSnapshot costs 20 + 1 weight per 60 candles returned; a plain
+        # refresh asks for the full 5000-candle limit (~103 weight).
+        "ohlcv_incremental_refresh": True,
     }
     trader_has_futures: TraderHas = {
         "stoploss_on_exchange": True,
@@ -181,29 +190,33 @@ class Hyperliquid(Exchange):
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
             raise TemporaryError(
-                f"Could not get hip3 funding rates due to {e.__class__.__name__}. Message: {e}"
+                f"Could not get hip3 dex {dex} data due to {e.__class__.__name__}. Message: {e}"
             ) from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 
-    def _fetch_hip3_funding_rates(self, symbols: list[str] | None = None) -> dict[str, Any]:
-        """`metaAndAssetCtxs` per hip3 dex, mapped onto our synthesized swap
-        symbols. Dex names come from the markets already loaded (the
-        `"<dex>:<ASSET>"` raw name form), so no discovery request is made.
+    def _is_hip3_symbol(self, symbol: str) -> bool:
+        market = self._markets.get(symbol) or {}
+        return bool(market.get("swap")) and ":" in str((market.get("info") or {}).get("name") or "")
+
+    def _hip3_dex_contexts(self, symbols: list[str] | None, purpose: str):
+        """Yield `(symbol, market_meta, asset_ctx)` from `metaAndAssetCtxs` per
+        hip3 dex, mapped onto our loaded swap symbols. Dex names come from the
+        markets already loaded (the `"<dex>:<ASSET>"` raw name form), so no
+        discovery request is made.
 
         Only the dexes the requested `symbols` actually live on are queried.
         Hyperliquid currently exposes NINE builder dexes (xyz, flx, vntl, hyna,
-        km, abcd, cash, para, mkts); querying all of them cost nine sequential
-        round trips per funding sweep when a whitelist of XYZ-* pairs needs
-        exactly one. With no symbols given this still covers everything, so
-        callers that genuinely want the full picture are unaffected.
+        km, abcd, cash, para, mkts); querying all of them costs nine round trips
+        when a whitelist of XYZ-* pairs needs exactly one. With no symbols given
+        this still covers everything.
 
         A dex that fails is skipped, not fatal: one unavailable builder dex must
-        not cost us the rates for all the others."""
-        # `is not None` for the same reason as in fetch_funding_rates above:
-        # an empty symbols list must scope this to nothing, not to every dex.
+        not cost us the data for all the others."""
+        # `is not None`, not truthiness: an empty list must scope this to
+        # nothing, not to every dex.
         if symbols is not None and not symbols:
-            return {}
+            return
         wanted = set(symbols) if symbols is not None else None
         by_raw_name: dict[str, str] = {}
         dexes: set[str] = set()
@@ -218,13 +231,11 @@ class Hyperliquid(Exchange):
             by_raw_name[raw] = symbol
             dexes.add(raw.split(":", 1)[0])
 
-        out: dict[str, Any] = {}
-        now_ms = dt_ts()
         for dex in sorted(dexes):
             try:
                 resp = self._fetch_hip3_dex_ctxs(dex)
             except Exception as e:
-                logger.warning("hip3 dex %r funding fetch failed - skipping it: %s", dex, e)
+                logger.warning("hip3 dex %r %s fetch failed - skipping it: %s", dex, purpose, e)
                 continue
             if not isinstance(resp, list) or len(resp) < 2:
                 continue
@@ -235,28 +246,114 @@ class Hyperliquid(Exchange):
                 symbol = by_raw_name.get(raw)
                 if not symbol or not isinstance(ctx, dict):
                     continue
-                funding = ctx.get("funding")
-                if funding is None:
-                    continue
-                out[symbol] = {
-                    "info": ctx,
+                yield symbol, market_meta or {}, ctx
+
+    def get_tickers(
+        self,
+        symbols: list[str] | None = None,
+        *,
+        cached: bool = False,
+        market_type: TradingMode | None = None,
+    ) -> Tickers:
+        """ccxt builds Hyperliquid tickers from its markets endpoints with no dex
+        scoping: fetch_tickers()/fetch_ticker() without a market type loads spot
+        + main perps + every builder dex (~240 weight of the 1200/min per-IP
+        budget, per call). Fetch only the main perp dex (if a requested symbol
+        lives there) plus the builder dexes the requested symbols live on."""
+        if self.trading_mode != TradingMode.FUTURES or market_type == TradingMode.SPOT:
+            return super().get_tickers(symbols, cached=cached, market_type=market_type)
+
+        wanted = set(symbols) if symbols is not None else None
+        hip3_wanted = (
+            None if wanted is None else sorted(s for s in wanted if self._is_hip3_symbol(s))
+        )
+        need_main = wanted is None or len(wanted) > len(hip3_wanted or [])
+
+        tickers: dict[str, Any] = {}
+        if need_main:
+            tickers.update(
+                super().get_tickers(None, cached=cached, market_type=TradingMode.FUTURES)
+            )
+        if hip3_wanted is None or hip3_wanted:
+            hip3_tickers = None
+            if cached and hip3_wanted is not None:
+                with self._cache_lock:
+                    hip3_tickers = self._fetch_tickers_cache.get("hip3_tickers")
+                if hip3_tickers is not None and not set(hip3_wanted) <= hip3_tickers.keys():
+                    hip3_tickers = None
+            if hip3_tickers is None:
+                hip3_tickers = self._fetch_hip3_tickers(hip3_wanted)
+                with self._cache_lock:
+                    self._fetch_tickers_cache["hip3_tickers"] = hip3_tickers
+            tickers.update(hip3_tickers)
+
+        if wanted is not None:
+            tickers = {s: t for s, t in tickers.items() if s in wanted}
+        return tickers
+
+    def fetch_ticker(self, pair: str) -> Ticker:
+        """Single-pair fetch via the dex-scoped get_tickers() - ccxt's own
+        fetch_ticker() goes through the unscoped all-dex fetch_tickers()."""
+        if self.trading_mode != TradingMode.FUTURES:
+            return super().fetch_ticker(pair)
+        if pair not in self.markets or self.markets[pair].get("active", False) is False:
+            raise ExchangeError(f"Pair {pair} not available")
+        ticker = self.get_tickers([pair]).get(pair)
+        if ticker is None:
+            raise TemporaryError(f"Could not load ticker for {pair}")
+        return ticker
+
+    def _fetch_hip3_tickers(self, symbols: list[str] | None) -> dict[str, Any]:
+        """Same fields ccxt's hyperliquid parse_ticker() reads, built from the
+        dex-scoped asset contexts."""
+        api = self._api
+        out: dict[str, Any] = {}
+        for symbol, market_meta, ctx in self._hip3_dex_contexts(symbols, "ticker"):
+            bid_ask = ctx.get("impactPxs") or []
+            out[symbol] = api.safe_ticker(
+                {
                     "symbol": symbol,
-                    "markPrice": self._api.safe_number(ctx, "markPx"),
-                    "indexPrice": self._api.safe_number(ctx, "oraclePx"),
-                    "interestRate": None,
-                    "estimatedSettlePrice": None,
-                    "timestamp": now_ms,
-                    "datetime": self._api.iso8601(now_ms),
-                    "fundingRate": self._api.safe_number(ctx, "funding"),
-                    "fundingTimestamp": None,
-                    "fundingDatetime": None,
-                    "nextFundingRate": None,
-                    "nextFundingTimestamp": None,
-                    "nextFundingDatetime": None,
-                    "previousFundingRate": None,
-                    "previousFundingTimestamp": None,
-                    "previousFundingDatetime": None,
-                }
+                    "timestamp": None,
+                    "datetime": None,
+                    "previousClose": api.safe_number(ctx, "prevDayPx"),
+                    "close": api.safe_number(ctx, "midPx"),
+                    "last": api.safe_number(ctx, "price"),
+                    "bid": api.safe_number(bid_ask, 0),
+                    "ask": api.safe_number(bid_ask, 1),
+                    "quoteVolume": api.safe_number(ctx, "dayNtlVlm"),
+                    "info": {**market_meta, **ctx},
+                },
+                self._markets.get(symbol),
+            )
+        return out
+
+    def _fetch_hip3_funding_rates(self, symbols: list[str] | None = None) -> dict[str, Any]:
+        """Funding rates for hip3 markets - see _hip3_dex_contexts."""
+        out: dict[str, Any] = {}
+        now_ms = dt_ts()
+        for symbol, _market_meta, ctx in self._hip3_dex_contexts(symbols, "funding"):
+            funding = ctx.get("funding")
+            if funding is None:
+                continue
+            out[symbol] = {
+                "info": ctx,
+                "symbol": symbol,
+                "markPrice": self._api.safe_number(ctx, "markPx"),
+                "indexPrice": self._api.safe_number(ctx, "oraclePx"),
+                "interestRate": None,
+                "estimatedSettlePrice": None,
+                "timestamp": now_ms,
+                "datetime": self._api.iso8601(now_ms),
+                "fundingRate": self._api.safe_number(ctx, "funding"),
+                "fundingTimestamp": None,
+                "fundingDatetime": None,
+                "nextFundingRate": None,
+                "nextFundingTimestamp": None,
+                "nextFundingDatetime": None,
+                "previousFundingRate": None,
+                "previousFundingTimestamp": None,
+                "previousFundingDatetime": None,
+            }
         if out:
             logger.debug("Fetched hip3 funding rates for %d market(s)", len(out))
         return out
