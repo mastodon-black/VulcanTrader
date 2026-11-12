@@ -13,6 +13,9 @@ REM        exchange - runs setup-ninjatrader.bat guided, which installs NT8 and
 REM        compiles the bridge. When NT8 is already installed (and neither flag
 REM        is given) there is no question: the bridge is just recompiled if the
 REM        repo copy changed (setup-ninjatrader.bat addon-if-needed).
+REM
+REM  Always: sets "fleet_worker_processes" in user_data\configs_system\system.json
+REM  to this machine's CPU count (preset another value with FLEET_WORKER_PROCESSES=N).
 REM ---------------------------------------------------------------------------
 setlocal enableextensions
 cd /d "%~dp0"
@@ -83,6 +86,15 @@ REM one) - always print what actually got registered after a build so a
 REM regression is visible immediately instead of surfacing later as an
 REM AttributeError deep in a backtest.
 ".venv\Scripts\python.exe" -c "import vulcan_rust_indicators as v; print('[install] vulcan_rust_indicators exports:', [f for f in dir(v) if not f.startswith('_')])"
+
+REM Split the single_process_mode fleet across one worker process per CPU on THIS
+REM machine (one process = one GIL). Re-run on every install, so a repo copied to
+REM a bigger/smaller box picks up that box's count.
+echo.
+set "VT_FLEET_WORKERS=%FLEET_WORKER_PROCESSES%"
+if not defined VT_FLEET_WORKERS set "VT_FLEET_WORKERS=auto"
+".venv\Scripts\python.exe" "VulcanTrader\util\fleet_workers.py" %VT_FLEET_WORKERS%
+if errorlevel 1 echo [install] WARNING: could not set fleet_worker_processes in user_data\configs_system\system.json - set it by hand ^(the core install is complete^).
 
 echo.
 echo [install] core install done.

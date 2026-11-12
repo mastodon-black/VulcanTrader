@@ -6,6 +6,7 @@ Cryptocurrency Exchanges support
 import asyncio
 import inspect
 import logging
+import random
 import signal
 from collections.abc import Coroutine, Generator
 from copy import deepcopy
@@ -126,6 +127,13 @@ T = TypeVar("T")
 # (or trading modes) never block each other.
 _markets_reload_locks: dict[Any, Lock] = {}
 _markets_reload_locks_guard = Lock()
+
+# After a failed markets reload, a bot that still has markets to serve waits up to
+# this long (randomly between half and all of it, so a fleet sharing one IP doesn't
+# retry in lockstep) before trying again - forced reloads included. Without it, one
+# 429 turned into a retry on every bot iteration: the `markets` property and
+# fetch_tickers' BadSymbol handler force a reload each time markets look wrong.
+MARKETS_RELOAD_COOLDOWN_MS = 5 * 60 * 1000
 
 # Funding-rate history + mark candles per pair, shared by every Exchange in the
 # process (see Exchange._shared_funding_inputs). key -> (fetched_at, since_ms,
@@ -254,8 +262,13 @@ class Exchange:
         self._pairs_last_refresh_time: dict[PairWithTimeframe, int] = {}
         # Holds the time each pair was last queried from the exchange
         self._pairs_last_poll_time: dict[PairWithTimeframe, int] = {}
-        # Timestamp of last markets refresh
+        # Timestamp of last markets refresh (the cache's own time when served from cache)
         self._last_markets_refresh: int = 0
+        # No markets reload before this time (ms) - set after a failed reload, see
+        # MARKETS_RELOAD_COOLDOWN_MS. 0 = no cooldown.
+        self._markets_retry_after: int = 0
+        # Write time (ms) of the markets cache file last loaded by _try_load_markets_from_cache
+        self._loaded_cache_ts: int = 0
 
         self._cache_lock = Lock()
         # Cache for 10 minutes ...
@@ -807,7 +820,8 @@ class Exchange:
         path = self._markets_cache_path()
         if not path.is_file():
             return False
-        age_h = (_t.time() - path.stat().st_mtime) / 3600.0
+        cache_mtime = path.stat().st_mtime
+        age_h = (_t.time() - cache_mtime) / 3600.0
         if age_h > max_age_hours:
             return False
         try:
@@ -833,6 +847,9 @@ class Exchange:
                 client.set_markets(markets, currencies)
             if self._exchange_ws and self._ws_async is not None:
                 self._ws_async.set_markets(markets, currencies)
+            # reload_markets dates the refresh from this, not from now - otherwise reusing
+            # an almost-expired cache buys it another full interval of life.
+            self._loaded_cache_ts = int(cache_mtime * 1000)
             logger.warning(
                 "[reload_markets] loaded %d markets from cache (age=%.1fh): %s",
                 len(markets), age_h, path,
@@ -927,6 +944,11 @@ class Exchange:
         """
         # Check whether markets have to be reloaded
         is_initial = self._last_markets_refresh == 0
+        if self._markets and dt_ts() < self._markets_retry_after:
+            # Cooling down after a failed reload (see MARKETS_RELOAD_COOLDOWN_MS): keep
+            # serving the current markets, forced reloads included. A bot with no
+            # markets is never held back - it can't make progress without a load.
+            return None
         if (
             not force
             and self._last_markets_refresh > 0
@@ -1004,7 +1026,13 @@ class Exchange:
                 if not cache_hit:
                     self._ws_async.set_markets_from_exchange(self._api_async)
                 self._ws_async.options = self._api.options
-            self._last_markets_refresh = dt_ts()
+            now_ms = dt_ts()
+            # Served from a sibling's cache: date the refresh from when that cache was
+            # fetched, so the next reload comes one interval after the fetch, not after now.
+            self._last_markets_refresh = (
+                min(self._loaded_cache_ts, now_ms) if cache_hit and self._loaded_cache_ts else now_ms
+            )
+            self._markets_retry_after = 0
 
             if is_initial and self.trader_has["needs_trading_fees"]:
                 _t0 = _t.perf_counter()
@@ -1015,6 +1043,12 @@ class Exchange:
                 self.fill_leverage_tiers()
         except (ccxt.BaseError, TemporaryError, TimeoutError):
             logger.exception("Could not load markets.")
+            cooldown_ms = int(MARKETS_RELOAD_COOLDOWN_MS * random.uniform(0.5, 1.0))
+            self._markets_retry_after = dt_ts() + cooldown_ms
+            if self._markets:
+                logger.warning(
+                    "Keeping the current markets; next markets reload in %.0fs.", cooldown_ms / 1000
+                )
             # Fallback: use stale cache so parallel backtest workers don't crash
             # with 'Could not load markets' when the API is rate-limited.
             if is_initial and not self._markets:

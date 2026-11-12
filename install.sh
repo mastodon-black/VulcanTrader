@@ -13,6 +13,9 @@
 #        which installs NT8 and compiles the bridge. When NT8 is already set up
 #        (and neither flag is given) there is no question: the bridge is just
 #        recompiled if the repo copy changed (./setup-ninjatrader.sh addon-if-needed).
+#
+#  Always: sets "fleet_worker_processes" in user_data/configs_system/system.json
+#  to this machine's CPU count (preset another value with FLEET_WORKER_PROCESSES=N).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -74,6 +77,13 @@ fi
 # regression is visible immediately instead of surfacing later as an
 # AttributeError deep in a backtest.
 python -c "import vulcan_rust_indicators as v; print('[install] vulcan_rust_indicators exports:', [f for f in dir(v) if not f.startswith('_')])"
+
+# Split the single_process_mode fleet across one worker process per CPU on THIS
+# machine (one process = one GIL). Re-run on every install, so a repo copied to
+# a bigger/smaller box picks up that box's count.
+echo
+python VulcanTrader/util/fleet_workers.py "${FLEET_WORKER_PROCESSES:-auto}" \
+    || echo "[install] WARNING: could not set fleet_worker_processes in user_data/configs_system/system.json - set it by hand (the core install is complete)." >&2
 
 echo
 echo "[install] core install done."

@@ -1,7 +1,8 @@
 """
 JSON-backed persistence bootstrap.
 
-``init_db(db_url)`` parses a ``json:///path/to/file.json`` URL, loads any
+``init_db(db_url)`` parses a ``json:///relative/file.json`` (or ``json:////absolute/file.json``,
+see ``_json_path_from_url``) URL, loads any
 existing trades/orders/locks/custom-data/key-value entries into a
 :class:`~VulcanTrader.persistence.base.PersistenceContext` bound to the
 calling thread's contextvars context (see persistence/base.py), and sets
@@ -58,14 +59,20 @@ def get_request_or_thread_id() -> str | None:
 
 
 def _json_path_from_url(db_url: str) -> Path:
-    """Parse ``json:///abs/path.json``, ``json://relative.json`` or ``json:relative.json``."""
-    if db_url.startswith("json://"):
-        raw = db_url[len("json://"):]
-    elif db_url.startswith("json:"):
-        raw = db_url[len("json:"):]
-    else:
-        raw = db_url
-    raw = raw.lstrip("/")
+    """Parse a ``json:`` URL with the usual database-URL slash rules (as for ``sqlite:``):
+
+    * ``json:relative.json``, ``json://relative.json``, ``json:///relative.json`` - relative
+      to the working directory (``json:///user_data/accounts/X.json`` is what bot.py builds)
+    * ``json:////abs/path.json`` (i.e. ``f"json:///{absolute_path}"``) - absolute
+
+    It used to strip every leading slash, so an absolute path silently became relative:
+    the file landed under the working directory instead (tests wrote into the repo's tmp/).
+    """
+    raw = db_url[len("json:"):] if db_url.startswith("json:") else db_url
+    if raw.startswith("///"):
+        raw = raw[3:]  # json:///rel -> rel, json:////abs -> /abs
+    elif raw.startswith("//"):
+        raw = raw[2:]  # json://rel
     return Path(raw).expanduser().resolve()
 
 
@@ -84,7 +91,8 @@ def _path_from_db_url(db_url: str) -> Path:
         # In-memory only -- use a temp file we never write back.
         return Path(os.devnull)
     raise ValueError(
-        f"Unsupported db_url {db_url!r}. Use json:///path/to/file.json"
+        f"Unsupported db_url {db_url!r}. Use json:///relative/file.json or "
+        "json:////absolute/file.json"
     )
 
 
