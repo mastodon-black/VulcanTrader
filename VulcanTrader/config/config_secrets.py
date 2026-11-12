@@ -22,6 +22,29 @@ _SENSITIVE_KEYS = [
     "discord.bot_token",
     "api_server.password",
     "webhook.url",
+    "coingecko.api_key",
+    # ccxt credentials (requiredCredentials) passed straight through ccxt_config - ccxt also
+    # accepts snake_case variants
+    *[
+        f"exchange.{ccxt_section}.{key}"
+        for ccxt_section in ("ccxt_config", "ccxt_sync_config", "ccxt_async_config")
+        for key in (
+            "apiKey",
+            "api_key",
+            "secret",
+            "uid",
+            "accountId",
+            "account_id",
+            "login",
+            "password",
+            "twofa",
+            "privateKey",
+            "private_key",
+            "walletAddress",
+            "wallet_address",
+            "token",
+        )
+    ],
 ]
 
 
@@ -36,18 +59,23 @@ def sanitize_config(config: Config, *, show_sensitive: bool = False) -> Config:
         return config
     config = deepcopy(config)
     for key in _SENSITIVE_KEYS:
-        if "." in key:
-            nested_keys = key.split(".")
-            nested_config = config
-            for nested_key in nested_keys[:-1]:
-                nested_config = nested_config.get(nested_key, {})
-            if nested_keys[-1] in nested_config:
-                nested_config[nested_keys[-1]] = "REDACTED"
-        else:
-            if key in config:
-                config[key] = "REDACTED"
+        nested_keys = key.split(".")
+        nested_config = _walk(config, nested_keys[:-1])
+        if nested_config is not None and nested_config.get(nested_keys[-1]):
+            nested_config[nested_keys[-1]] = "REDACTED"
 
     return config
+
+
+def _walk(config: dict, path: list[str]) -> dict | None:
+    """The nested dict at `path`, or None if any level is missing or not a dict
+    (e.g. "ccxt_config": null)."""
+    node: object = config
+    for part in path:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node if isinstance(node, dict) else None
 
 
 def remove_exchange_credentials(exchange_config: ExchangeConfig, dry_run: bool) -> None:
@@ -67,9 +95,11 @@ def remove_exchange_credentials(exchange_config: ExchangeConfig, dry_run: bool) 
     _preserve = {"exchange.walletAddress", "exchange.wallet_address"}
 
     for key in [k for k in _SENSITIVE_KEYS if k.startswith("exchange.")]:
-        if key in _preserve:
+        nested_keys = key.removeprefix("exchange.").split(".")
+        if key in _preserve or nested_keys[-1] in ("walletAddress", "wallet_address"):
             continue
-        if "." in key:
-            key1 = key.removeprefix("exchange.")
-            if key1 in exchange_config:
-                exchange_config[key1] = ""
+        # Walk nested sections too (exchange.ccxt_config.secret, ...) - a credential given
+        # straight to ccxt must not survive into dry-run either.
+        nested_config = _walk(exchange_config, nested_keys[:-1])
+        if nested_config is not None and nested_keys[-1] in nested_config:
+            nested_config[nested_keys[-1]] = ""

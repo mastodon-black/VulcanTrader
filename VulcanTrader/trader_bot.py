@@ -1004,7 +1004,7 @@ class VulcanTraderBot(LoggingMixin):
         try:
             # Wrap db activities in shutdown to avoid problems if database is gone,
             # and raises further exceptions.
-            if self.config["cancel_open_orders_on_exit"]:
+            if self.config.get("cancel_open_orders_on_exit"):
                 self.cancel_all_open_orders()
 
             self.check_for_open_trades()
@@ -1230,7 +1230,7 @@ class VulcanTraderBot(LoggingMixin):
         """
         Close all orders that were left open
         """
-        if self.config["cancel_open_orders_on_exit"]:
+        if self.config.get("cancel_open_orders_on_exit"):
             self.cancel_all_open_orders()
 
     def check_for_open_trades(self):
@@ -1373,7 +1373,7 @@ class VulcanTraderBot(LoggingMixin):
 
             except InvalidOrderException as e:
                 logger.warning(f"Error updating Order {order.order_id} due to {e}.")
-                if order.order_date_utc - timedelta(days=5) < datetime.now(UTC):
+                if order.order_date_utc < datetime.now(UTC) - timedelta(days=5):
                     logger.warning(
                         "Order is older than 5 days. Assuming order was fully cancelled."
                     )
@@ -1518,7 +1518,7 @@ class VulcanTraderBot(LoggingMixin):
                     if trade.base_currency
                     else 0
                 )
-                if total < trade.amount:
+                if total < trade.amount or (total == 0 and trade.amount == 0):
                     if trade.fully_canceled_entry_order_count == len(trade.orders):
                         logger.warning(
                             f"Trade only had fully canceled entry orders. "
@@ -2626,7 +2626,12 @@ class VulcanTraderBot(LoggingMixin):
                         f"timed out {max_timeouts} times. force selling {order['amount']}."
                     )
 
-                    self.emergency_exit(trade, order["price"], order_obj.safe_remaining)
+                    # Some exchanges don't return a price for cancelled orders.
+                    self.emergency_exit(
+                        trade,
+                        order.get("price") or order_obj.safe_placement_price,
+                        order_obj.safe_remaining,
+                    )
             return canceled
 
     def emergency_exit(
@@ -2870,12 +2875,14 @@ class VulcanTraderBot(LoggingMixin):
 
         if order["status"] not in constants.NON_OPEN_EXCHANGE_STATES:
             filled_val: float = order.get("filled", 0.0) or 0.0
-            filled_stake = filled_val * trade.open_rate
+            # What stays open after the cancel: any existing position (DCA - trade.amount is 0
+            # for a fresh entry) plus the filled part of this order.
+            remaining_stake = (trade.amount + filled_val) * trade.open_rate
             minstake = self.exchange.get_min_pair_stake_amount(
                 trade.pair, trade.open_rate, self.strategy.stoploss
             )
 
-            if filled_val > 0 and minstake and filled_stake < minstake:
+            if filled_val > 0 and minstake and remaining_stake < minstake:
                 logger.warning(
                     f"Order {order_id} for {trade.pair} not cancelled, "
                     f"as the filled amount of {filled_val} would result in an unexitable trade."

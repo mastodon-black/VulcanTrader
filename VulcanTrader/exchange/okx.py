@@ -37,6 +37,7 @@ class Okx(Exchange):
     }
     trader_has_futures: TraderHas = {
         "tickers_have_quoteVolume": False,
+        "funding_history_limit": 100,
         "stop_price_type_field": "slTriggerPxType",
         "stop_price_type_value_mapping": {
             PriceType.LAST: "last",

@@ -181,6 +181,7 @@ def stoploss_from_absolute(
         stoploss = -stoploss
 
     # negative stoploss values indicate the requested stop price is higher/lower
-    # (long/short) than the current price
-    # shorts can yield stoploss values higher than 1, so limit that as well
-    return max(min(stoploss, 1.0), 0.0) * leverage
+    # (long/short) than the current price.
+    # No upper clamp at 1: shorts past 100% profit legitimately need values above 1, and
+    # clamping them pulled the stop towards price, making it trail.
+    return max(stoploss, 0.0) * leverage

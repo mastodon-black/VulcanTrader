@@ -73,7 +73,7 @@ class PairLocks:
         return [
             lock
             for lock in PairLocks.locks
-            if lock.lock_end_time >= now
+            if lock.lock_end_time > now  # same as the use_db path / live and dry-run
             and lock.active is True
             and (pair is None or lock.pair == pair)
             and (side is None or lock.side == "*" or lock.side == side)

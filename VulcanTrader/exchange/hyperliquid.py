@@ -523,6 +523,14 @@ class Hyperliquid(Exchange):
                     if total_amount
                     else None
                 )
+                # Fill lastTradeTimestamp - used to set the filled date
+                order["lastTradeTimestamp"] = max(t.get("timestamp") or 0 for t in trades)
+                if total_amount < order["filled"]:
+                    # ccxt derives filled as origSz - sz, which reports the full order size
+                    # for reduce-only orders capped by a smaller position.
+                    # related: https://github.com/ccxt/ccxt/issues/30839
+                    order["filled"] = total_amount
+                    order["remaining"] = order["amount"] - total_amount
         return order
 
     def fetch_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:

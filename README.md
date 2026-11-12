@@ -493,13 +493,13 @@ source .venv/bin/activate
 
 ```powershell
 # Live (dry-run) trading
-.venv\Scripts\python.exe -m VulcanTrader.bot trade -c live --strategy AlphaHunterV5 --dry-run
+.venv\Scripts\python.exe -m VulcanTrader.bot trade -c live --strategy ThorEngine --dry-run
 
 # Web portal only (no bot)
 .venv\Scripts\python.exe -m VulcanTrader.bot webserver --port 8060
 
 # Single backtest
-.venv\Scripts\python.exe -m VulcanTrader.bot backtest -c configs/configAlphaHunterV5_Paper.json -s AlphaHunterV5 --timerange 20250101- --datadir user_data/data/hyperliquid
+.venv\Scripts\python.exe -m VulcanTrader.bot backtest -c configs/configThorEngine_Paper.json -s ThorEngine --timerange 20250101- --datadir user_data/data/hyperliquid
 
 
 # Download last 90 days of OHLCV for two pairs at three timeframes
@@ -511,12 +511,12 @@ Download it from: http://frequenthippo-dl.ddns.net/wp-content/uploads/hyperliqui
 And put it correctly in the user_data\data folder. (should be user_data\data\hyperliquid\futures with a bunch of feather files in there.
 
 # Look-ahead bias check (signals + indicators)
-.venv\Scripts\python.exe -m VulcanTrader.bot lookahead-analysis -c live -s AlphaHunterV5 `
+.venv\Scripts\python.exe -m VulcanTrader.bot lookahead-analysis -c live -s ThorEngine `
     --timerange 20250101- --pairs BTC/USDT ETH/USDT `
     --minimum-trade-amount 10 --targeted-trade-amount 50
 
 # Recursive (startup-candle) bias check
-.venv\Scripts\python.exe -m VulcanTrader.bot recursive-analysis -c live -s AlphaHunterV5 `
+.venv\Scripts\python.exe -m VulcanTrader.bot recursive-analysis -c live -s ThorEngine `
     --timerange 20250101- --pairs BTC/USDT `
     --startup-candle 199 399 999
 ```

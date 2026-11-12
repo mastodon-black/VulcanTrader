@@ -50,6 +50,7 @@ class Binance(Exchange):
     }
     trader_has_futures: TraderHas = {
         "funding_fee_candle_limit": 1000,
+        "funding_history_limit": 1000,
         "stoploss_order_types": {"limit": "stop", "market": "stop_market"},
         "stoploss_blocks_assets": False,  # Stoploss orders do not block assets
         "stoploss_query_requires_stop_flag": True,

@@ -897,8 +897,14 @@ class LocalTrade:
             return
 
         logger.info(f"Updating trade (id={self.id}) ...")
-        if order.ft_order_side != "stoploss":
-            order.funding_fee = self.funding_fee_running
+        if order.ft_order_side != "stoploss" and order.funding_fee is None:
+            # Only on the first processing of this fill - re-processing an already filled
+            # order (startup sync, repeated update_trade_state) must not reset its funding fee
+            # to the (by then zero) running amount.
+            order.funding_fee = (
+                self.funding_fee_running if self.funding_fee_running is not None else 0.0
+            )
+            # Reset running funding fees
             self.funding_fee_running = 0.0
         order_type = order.order_type.upper() if order.order_type else None
 
@@ -1125,16 +1131,20 @@ class LocalTrade:
         max_stake_amount = FtPrecise(0.0)
         total_stake = 0.0
         avg_price = FtPrecise(0.0)
-        close_profit = 0.0
+        close_profit = None
         close_profit_abs = 0.0
         self.funding_fees = 0.0
-        funding_fees = 0.0
-        ordercount = len(self.orders) - 1
+        # Total funding fees - cumulated over all orders
+        total_funding_fees = 0.0
+        # Funding fees since the last exit - reset on every exit, as they are part of that
+        # exit's profit (keeps realized_profit of open trades in line with later close profits)
+        current_funding_fee = 0.0
         prof = None
-        for i, o in enumerate(self.orders):
+        for o in self.orders:
             if o.ft_is_open or not o.filled:
                 continue
-            funding_fees += o.funding_fee or 0.0
+            current_funding_fee += o.funding_fee or 0.0
+            total_funding_fees += o.funding_fee or 0.0
             tmp_amount = FtPrecise(o.safe_amount_after_fee)
             tmp_price = FtPrecise(o.safe_price)
 
@@ -1149,21 +1159,25 @@ class LocalTrade:
                     avg_price = current_stake / current_amount
 
             if is_exit:
-                if i == ordercount and is_closing:
-                    self.funding_fees = funding_fees
+                # Intermediate funding fees for this exit's profit calculation
+                self.funding_fees = current_funding_fee
                 exit_rate = o.safe_price
                 exit_amount = o.safe_amount_after_fee
                 prof = self.calculate_profit(exit_rate, exit_amount, float(avg_price))
                 close_profit_abs += prof.profit_abs
                 if total_stake > 0:
                     close_profit = (close_profit_abs / total_stake) * self.leverage
+                current_funding_fee = 0.0
             else:
                 total_stake += self._calc_open_trade_value(tmp_amount, price)
                 max_stake_amount += tmp_amount * price
-        self.funding_fees = funding_fees
+        # Assign cumulated funding fees after all orders have been processed
+        self.funding_fees = total_funding_fees
         self.max_stake_amount = float(max_stake_amount) / (self.leverage or 1.0)
 
-        if close_profit and prof is not None:
+        # `is not None`, not truthiness: partial exits that offset each other to exactly 0
+        # must still reset realized_profit instead of leaving a stale value behind.
+        if close_profit is not None and prof is not None:
             self.close_profit = close_profit
             self.realized_profit = close_profit_abs
             self.close_profit_abs = prof.profit_abs

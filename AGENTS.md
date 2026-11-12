@@ -80,6 +80,7 @@ static/                     ← Static assets (JS, CSS)
 | `backtest` | `cmd_backtest()` | Run one or many strategy backtests (async fan-out) |
 | `download-data` | `cmd_download_data()` | Fetch OHLCV history |
 | `webserver` | `cmd_webserver()` | Web portal + Discord bot; also calls `_launch_autostart_configs()` itself on startup (opt out with `--no-autostart`) - see "Multi-bot fleet control" |
+| `ninjatrader` | `cmd_ninjatrader()` | `status` / `start` / `stop` NinjaTrader 8 for the ninjatrader exchange, and `auto-start [on\|off]` to show or set system.json `ninjatrader.auto_start`. When that's on, `webserver` and `autostart` start NT8 before launching bots (see "NinjaTrader 8 on Linux (Wine)" → *Starting NT8 from VulcanTrader*) |
 | `lookahead-analysis` | `cmd_lookahead_analysis()` | Bias detection |
 | `recursive-analysis` | `cmd_recursive_analysis()` | Recursive bias detection |
 | `hyperopt` | `cmd_hyperopt()` | Bayesian strategy-parameter optimisation (Optuna) |
@@ -451,6 +452,50 @@ the bar open (`fill_fee`), which covers strategy-priced orders too. The engine
 keeps its own trade accounting — `Order.close_bt_order`'s
 `recalc_trade_from_orders` is deliberately not used (see `_close_order_object`).
 
+### CME futures fees (both the native Rust engine and live/dry-run)
+
+Every `configNT_*` bot used one flat, generic %-of-notional `fee` (copied from the crypto
+configs' convention) until 2026-11-11. Real CME commissions are a flat $/contract/side
+figure (`fee_per_contract` in `VulcanTrader/exchange/futures_specs.py`, already researched
+there but — per that module's own former docstring — never actually wired into anything);
+converting a flat $ figure to a %-of-notional rate makes it drift with price and with the
+contract's own multiplier, so the one number every config had was wrong in both directions
+depending on contract size: measured ~135x too expensive for NQ (large notional, e.g.
+$616k/contract), ~6x too cheap for a small micro-notional contract like MET. Fixed by
+backtesting all 35 `configNT_*` configs' own static `fee` to the worst (highest) real
+equivalent across their traded pairs as an interim measure, then wiring the real economics
+into both engines directly so no static number is needed at all:
+
+- **Live/dry-run:** `Futuressim`/`Rithmic`/`Ninjatrader` each override `get_fee()` to call
+  `futures_common.get_futures_fee_pct(root, price, is_maker=...)` (price-dependent, falls
+  back to the base class's config-`fee`/ccxt lookup for symbols with no spec — the CFD
+  placeholders) instead of inheriting the base `Exchange.get_fee()`'s flat-config-fee
+  short-circuit. `Exchange.add_dry_order_fee()` (the dry-run order's actual fee-charging
+  call site) now passes the REAL fill price (`dry_order["average"] or dry_order["price"]`)
+  into `get_fee()` instead of its unused `price=1` default — the one-line bug that made the
+  override pointless even once it existed.
+- **Native Rust engine (`multi_pair.rs`):** `PairInput` gained a `fee_per_contract: f64`
+  field (`<= 0.0` = "no override", so every non-futures-spec pair — all of Hyperliquid,
+  Polymarket, etc. — is completely unaffected and behaves exactly as before; verified via
+  the crate's own 89-test suite plus an identical-trades rerun of an existing Hyperliquid
+  backtest). `fill_fee()` and every OTHER place fee enters the profit math — `open_profit`/
+  `eval_custom_exit` (the `current_profit` value strategies like `custom_exit` branch
+  decisions on), the intrabar trailing/ROI bound check, the ROI-tier price solve, and the
+  end-of-data `ForceExit` — now resolve a per-pair, per-fill-price fee via one shared
+  `futures_fee_override()` helper instead of the flat `EngineConfig.fee_taker`/`fee_maker`.
+  `rust_backtest.py::_build_multi_pair_rust_inputs` supplies the number per pair via a new
+  `exchange.get_fee_per_contract(pair)` method (same three exchange classes), the Rust-side
+  counterpart to `get_futures_fee_pct` — it hands over the raw $ figure, not an
+  already-price-divided percentage, because the native engine has its own fill price to
+  divide by at the moment of each fill (not whatever price Python last saw).
+- Verified directly, not just read: 96/96 ZL trades' recorded `fee_open` matched
+  `2.25 / (open_rate * 600)` to full float precision after the fix, vs. one constant number
+  before it.
+- The Python `backtesting.py`/`_joint_multi_pair_backtest` engines were deliberately left
+  alone (out of scope — `--engine rust` is what these configs actually run; the plain Python
+  engine takes 0 trades on them regardless, see the fractional-contracts note elsewhere in
+  this doc).
+
 ### Strategy authoring pattern
 
 - **Standard indicators** → pull from the bridge (identical to the engine, no
@@ -563,7 +608,7 @@ keeps its own trade accounting — `Order.close_bt_order`'s
 | `POST` | `/api/livebots/{name}/stop` | Graceful stop - `stop_in_process_bot()` (instant, sets that bot's `stop_event` directly) if it's hosted in THIS process under `single_process_mode`, else the cross-process stop-file (`<db>.json.stop`) |
 | `POST` | `/api/livebots/{name}/forceexit?pair=` | Cross-process force-exit (writes `<db>.json.forceexit`) |
 | `GET` | `/api/dashboard?bot=<name>` | Full dashboard payload for another account's bot |
-| `GET` | `/api/configs` | List configs with `is_bot` not explicitly false, each with `strategy`/`auto_start`/`dry_run`/`running`/`crashed` |
+| `GET` | `/api/configs` | List configs with `is_bot` not explicitly false, each with `strategy`/`auto_start`/`dry_run`/`running`/`crashed`/`has_account`/`closed_trades`/`closed_profit_abs`/`starting_capital`/`net_pct` (`has_account` = a saved account file exists, so `/api/dashboard?bot=` can show its stats even if it isn't running; the trading page uses it to decide which bot names are clickable. `net_pct` = realised profit / starting capital × 100, `null` until the bot has closed a trade; the Bots list shows it and sorts on it) |
 | `GET`/`PUT` | `/api/configs/{name}/raw` | Read/write a config's raw JSON |
 | `POST` | `/api/configs/{name}/duplicate` \| `/rename` | Copy / rename a config file |
 | `DELETE` | `/api/configs/{name}` | Delete a config (blocked while its bot is running) |
@@ -586,6 +631,34 @@ instead reads ONLY the `date` column via `pyarrow.feather.read_table(path,
 columns=["date"])`, fanned out across a 32-worker `ThreadPoolExecutor` (files
 are read concurrently since pyarrow releases the GIL during the actual read) -
 brings the same Hyperliquid scan down from "didn't finish in 120s" to ~12s.
+
+### Theming — light by default, dark opt-in (`static/theme.css`, `static/theme.js`)
+Every served page (`login`, `trading`, `backtester`, `datamanager`) loads
+`/static/theme.js` first thing in `<head>` and `/static/theme.css` after its own
+`<style>`. `:root` is the **light** palette (the default for a first-time
+visitor, regardless of OS preference); `:root[data-theme="dark"]` is the
+original dark palette, opt-in via the moon/sun button in each navbar (fixed
+top-right on login). The choice is remembered in `localStorage`
+(`VulcanTrader_theme`) and synced across open tabs. `theme.js` stamps
+`data-theme` on `<html>` before first paint, so a saved dark choice never
+flashes white.
+
+Rules that keep both skins working:
+- **Never hardcode a colour that differs between skins** — in CSS, markup
+  (`style="color:var(--text-soft)"`), or JS DOM styles. Add a variable to
+  *both* palette blocks in `theme.css`. Tints use the channel triplets:
+  `rgba(var(--pos-rgb), .12)`.
+- **Charts can't read CSS variables.** Plotly and lightweight-charts take
+  concrete colours, so JS asks `VulcanTheme.chart()` / `.css('--pos')` /
+  `.rgba('--pos', a)` at draw time, and pages redraw on the `vulcan-theme`
+  window event (`_restyleCharts()` in `trading.html` / `backtester.html`).
+  New chart code must do the same or it will stay dark on a white page.
+- Light status colours (`--pos`/`--neg`/`--neu`) are deliberately darker than
+  the dark ones — the pastel dark values are unreadable on white.
+- `template/exampleStyle.html` is a non-served freqtrade UI reference with its
+  own compiled CSS; it is not themed. `VulcanTrader/template/` and
+  `VulcanTrader/static/` are stale copies that nothing reads — the portal serves
+  the repo-root `template/` and `static/` (`REPO_ROOT` in `web_portal.py`).
 
 ### Authentication
 Single bearer token derived from `config["api_server"]["password"]` (default `"VulcanTrader"`), compared with `secrets.compare_digest` (constant-time).
@@ -648,6 +721,8 @@ one key via deep-merge (e.g. `configCoinbase.json` sets
 `"discord": {"enabled": false, "webhook_url": "", "bot_token": ""}` to fully
 opt out, without needing to also duplicate the rest of the shared block).
 
+system.json's `ninjatrader` block holds fleet-wide NinjaTrader 8 settings. `auto_start` (bool, default false) makes `webserver` and `autostart` start NT8 before the bots launch. `host`/`port` are the VulcanTraderBridge endpoint, and `memory_max`/`memory_swap_max`/`exe_path` are optional. Details are in "NinjaTrader 8 on Linux (Wine)" → *Starting NT8 from VulcanTrader*. The block's `account` and `contract_months` aren't read by any code yet. Bots still take `exchange.ninjatrader_account` and contract-alias pairs from their own config.
+
 `configs_system/data_server.json` is unrelated — it's `data_server.py`'s own
 auto-written config (see `trader_bot.py::_write_data_server_config()`), not
 something a user edits directly. Its `show_terminal`/`tmux` fields (default
@@ -693,6 +768,27 @@ master collects) and the subserver port accepts `push_ohlcv`/`push_trades`,
 which `DataCache.merge_*` writes into the feather files the backtester
 reads. A hostile subserver connection can poison on-disk history. Private
 networks or firewalled ports only.
+
+### Candle refresh gate (`Exchange._now_is_time_to_refresh` / `_process_ohlcv_df`)
+
+Ported from upstream freqtrade 2026-11-11. Both the data_server master (`_is_due`) and direct bot
+refreshes go through it. Hyperliquid omits candles with no trades, so the newest candle of an
+illiquid pair's response is often a *completed* one. The old code always dropped the last candle
+as "incomplete", which left illiquid pairs one candle behind and re-polled them every loop. Now:
+
+- The last candle is dropped only if it is the forming one, or if it is the just-closed candle
+  inside the grace period (`ohlcv_late_candle_grace_secs`, 15 s, capped at half a candle), where
+  the exchange may still update it.
+- A pair is polled once per new candle. It is re-polled during the grace period if the just-closed
+  candle is missing, and otherwise at most every `ohlcv_max_poll_interval_secs` (30 min).
+- `_pairs_last_poll_time` records when each pair was last queried. `_pairs_last_refresh_time` is
+  the last candle actually kept, read from the converted frame.
+- Funding-rate candles are never dropped (`_drop_incomplete_candle`).
+
+Measured live on 1m candles: liquid pairs still take 1 request per candle. Pairs with no trades
+for hours take 4 per candle (close plus 3 grace re-polls), down from one every loop (~12/min).
+data_server's disk seeding and the bot's push injection write `_pairs_last_refresh_time`
+directly, and that stays compatible: no poll time means "poll at the next candle".
 
 Multi-machine fleets: master binds `0.0.0.0`; remote bots set
 `data_server_ip` to its LAN address **and** `auto_start_data_server: false`,
@@ -795,6 +891,40 @@ bot's account permanently reporting `running: true` for the rest of the
 process's life even though its own `is_running` KV flag correctly read 0 -
 found live, not by a unit test.
 
+### `fleet_worker_processes` — split single_process_mode across cores
+
+One process means one GIL: a large fleet pins a single core (measured: 69 bots
+at 110–130% CPU on a 4-core box, some bots 10+ min per cycle) while the other
+cores idle. With `single_process_mode: true` and `fleet_worker_processes: N`
+(N > 1) in `system.json`, `webserver` doesn't host the autostart bots itself:
+`bot.py::_launch_fleet_workers()` splits them into N shards (greedy by pair
+count) and spawns N `bot.py fleet-worker --worker-id i --bots ...` processes,
+each hosting its shard via `launch_bot_in_process()` exactly as the webserver
+would. RAM stays close to single-process (one interpreter + imports per worker,
+not per bot). Notes:
+
+- The webserver stays the control plane. Dashboard/Discord already reach bots
+  in other processes: status via the account writer-lock probe, stop via the
+  `<db>.json.stop` file. A manual dashboard *start* still runs in the
+  webserver process.
+- Workers run in their own session/process group, so a terminal Ctrl+C hits
+  only the webserver; its `on_shutdown` (`_shutdown_fleet`) sends them SIGTERM
+  (stop files on Windows), and `cmd_webserver` waits for them to exit before
+  returning - otherwise an immediate restart saw their bots still holding
+  locks, skipped them as "already running", and left them down.
+- A worker stops its bots with a 20s grace (`_FLEET_WORKER_STOP_GRACE_S`) and
+  exits 0 once it hosts no bots. `_supervise_fleet_workers()` restarts a
+  worker only on a non-zero exit (crash/kill), after 30s; the relaunched
+  worker skips bots already running elsewhere.
+- Each worker logs to its own `VulcanTrader_<ts>_worker<i>.txt` (logger
+  `name_suffix`) - workers usually start within the same second.
+- Each worker has its own data_server client (`shared-<exchange>-<pid>`).
+  The Hyperliquid rate limiter is shared across processes
+  (`exchange/shared_rate_limiter.py`); the funding-input dedup cache
+  (`Exchange._shared_funding_inputs`) is per process.
+- Don't send SIGUSR1/faulthandler all-thread dumps to a busy worker: dumping
+  ~100 running threads without the GIL segfaulted all three workers once.
+
 ### Discord: multi-bot `!` prefix commands (`util/discord_bot.py`)
 
 `DiscordBot` runs from `bot.py::cmd_webserver()` — a control-plane concern
@@ -830,6 +960,101 @@ interactions landing on a stale session).
 Requires the Message Content Intent enabled in the Discord Developer Portal
 (Bot page → Privileged Gateway Intents) — prefix commands need to read raw
 message text; without it the client logs in but never sees a `!command`.
+
+---
+
+## NinjaTrader 8 on Linux (Wine)
+
+The `ninjatrader` exchange (`exchange/ninjatrader.py`) talks to NT8 through the
+VulcanTraderBridge AddOn (`exchange/ninjatrader_addon/VulcanTraderBridge.cs`,
+TCP :8755). It's an optional component: `install.sh` / `install.bat` ask about
+it at the end and run the matching guided setup. On Linux,
+`setup-ninjatrader.sh` (repo root) builds the whole stack. Every step is
+idempotent, and `doctor` verifies all of it, including the configs:
+
+```
+./setup-ninjatrader.sh guided           # everything; asks for sudo, the NT8 .msi, the NT login
+# or step by step:
+sudo ./setup-ninjatrader.sh system      # WineHQ stable, winetricks, Xvfb/xfwm4/xdotool,
+                                         # + supervised, memory-capped nt8-autostart.service
+NT8_INSTALLER=/path/NinjaTrader.Install.msi NT_USERNAME=… NT_PASSWORD=… ./setup-ninjatrader.sh all
+./setup-ninjatrader.sh doctor
+```
+
+Steps: `prefix` → `install` → `credentials` → `addon` → `start` (`all` runs them
+in order; `guided` adds `system` first and starts NT8 under the boot unit).
+
+**Windows** (`setup-ninjatrader.bat` → `exchange/ninjatrader_addon/windows/setup-ninjatrader.ps1`,
+Windows PowerShell 5.1) runs NT8 natively, so the Wine-only fixes below don't
+apply. It does three things:
+- `install`: the `.msi` with a UAC prompt.
+- `addon`: waits for NT8's first run, asks you to close NT8, deploys the AddOn
+  and compiles it with the same `linux/ntbuild.cs` driver natively. So there's
+  no NinjaScript Editor/F5 step.
+- `doctor`.
+
+This script has not yet been run on a real Windows box. Its batch wrapper and
+`install.bat`'s prompt logic were exercised under Wine's `cmd` only. Settings (prefix path, display, bridge port, credentials path) live in
+`~/.config/vulcantrader/ninjatrader.env`, read by the setup script and by
+`ninjatrader_addon/linux/nt8-autostart.sh`. Every fix below was found live on
+2026-11-08/11 (winehq-stable 11.0, NT8 8.1.8.4, Ubuntu 24.04). Don't remove any
+of them without re-testing.
+
+| Fix | Why |
+|---|---|
+| Prefix: .NET 4.8 via winetricks (`win10`, `dotnet48`, `win10`, `corefonts`) | NT8 needs real .NET Framework, not wine-mono. |
+| `HKCU\Software\Microsoft\Avalon.Graphics\DisableHWAcceleration=1` | Without WPF software rendering, wined3d deadlocks when the login window is torn down. NT8 then hits "Class has open windows" and hangs with no windows. |
+| `linux/websocket/websocket.dll` + DllOverride `websocket=native,builtin` | Wine's builtin websocket.dll is a stub (Wine bug 54623). .NET's `ClientWebSocket` needs it, and NT8's Tradovate/Simulation connection uses `ClientWebSocket`. Without it you get "type initializer for WebSocketProtocolComponent" / LogOnFailed. This is our own client-side implementation of the WebSocket Protocol Component API. It uses zero-key masking, which is what .NET's `useZeroMaskingKey` mode sends too. MinGW-built from `websocket.c` when `x86_64-w64-mingw32-gcc` exists, else the shipped binary. `linux/websocket/test/` has the 60-check ClientWebSocket harness. |
+| AddOn compiled by `linux/ntbuild.cs` (NT8's bundled Roslyn) | Under Wine/Xvfb NT8 never recompiles NinjaScript itself, either on restart or on file change, and its NinjaScript Editor can't be opened headless. Moving NinjaTrader.Custom.dll aside makes NT8 copy in a stock DLL without the bridge. The driver builds every `bin/Custom/*.cs` except `NinjaTrader.Vendor.cs`, with no `PRODUCTION` define (version 8.1.9.0, same as NT8's own builds). It excludes the `NinjaTrader.Client.dll` reference (that DLL duplicates Core types) and copies `Resource.resources` from the previous DLL. The binding redirects are generated from `NinjaTrader.exe.config`. Restart NT8 to load the result. |
+| Headless login (`nt8-autostart.sh`) | Xvfb plus xfwm4 (WPF activation needs `_NET_ACTIVE_WINDOW`), with xdotool typing into the login dialog. Only a "Welcome" window id that survives a settle delay is used, because Wine/WPF recreates it during startup. The "Select a Trading Mode" picker is the same "Welcome" window resized from 378 to 902 px wide. Between attempts the script waits on `wineserver -w`, otherwise the relaunch attaches to the dying server. `pgrep -f` patterns are anchored (`NinjaTrader\.exe$`) so they don't match their own shell. |
+| Boot unit: `--supervise`, `MemoryMax=3G`, `MemorySwapMax=2G`, `OOMPolicy=continue` | NT8 under Wine grows about 1 GB/h; it reached 25 GB of swap in 22 h and caused hard hangs. The kernel kills it at the cap and the supervisor loop relaunches it, with a memory-pressure preflight and backoff. |
+
+Configs on the `ninjatrader` exchange (`doctor` checks both rules):
+- `exchange.ninjatrader_account` is required (e.g. `"Sim101"`). Without it,
+  bot init fails and retries every 30 s, forever.
+- `pair_whitelist` entries are contract aliases `ROOT-MM-YY` (e.g. `HG-12-26`,
+  sent to NT8 as `HG 12-26`). NT8 can't resolve a bare root (`HG`), and
+  CFD/ETF symbols (`UKOIL`, `XAUUSD`, `VTI`, …) don't exist on NT8 at all.
+  Contract months roll by hand.
+
+**Starting NT8 from VulcanTrader**: set `system.json` → `"ninjatrader": {"auto_start": true}`.
+`bot.py webserver` (so `run-app.sh`) and `bot.py autostart` then call
+`util/ninjatrader_launcher.py::start_for_fleet()` just before the auto_start bots
+launch. It doesn't block, and bots retry the bridge every few seconds anyway.
+
+The launcher does nothing when any of these hold:
+- the bridge `host` isn't this machine,
+- the bridge is already listening on `host:port`,
+- the supervised boot unit `nt8-autostart.service` is active (it owns NT8),
+- an NT8 process is already running (still logging in).
+
+Otherwise it starts NT8:
+- **Linux:** runs the repo's `linux/nt8-autostart.sh` as the one-shot transient
+  `systemd-run --user` unit `vulcantrader-ninjatrader`. That unit is capped by
+  `memory_max`/`memory_swap_max` (default 3G/2G), so NT8 isn't a child of the
+  webserver and survives a fleet restart. A previous run's leftover unit is
+  cleared first. Without a user systemd manager it runs as a detached process
+  instead (new session, log in `/tmp/vulcantrader-ninjatrader.log`).
+- **Windows:** opens `NinjaTrader.exe` (`exe_path`) and you log in yourself.
+
+A background thread logs "bridge is up" or a warning after 10 min. A second
+webserver started with `--no-autostart` doesn't start NT8. VulcanTrader never
+stops NT8 on exit. Nothing restarts it if it dies later; that is the
+supervised boot unit's job. Its errors are logged and never stop the fleet.
+
+CLI: `python -m VulcanTrader.bot ninjatrader status` (shows what `start` would
+do), `… start`, `… stop`, `… auto-start on|off`. The guided installs
+(`setup-ninjatrader.{sh,bat} guided`) ask whether to turn `auto_start` on,
+default yes, via `python util/ninjatrader_launcher.py --auto-start on|off`
+(stdlib only, so it works before the venv's deps are importable). `doctor`
+reports the setting. Self-test:
+`python -m VulcanTrader.util.ninjatrader_launcher --self-test`.
+
+Gotchas: NT8 pops an "Accept agreement to get real-time data" (NYSE) dialog,
+which only affects stock data and is left for the user to accept. A worker's
+30 s init retry reuses the in-memory config, so config edits need a bot
+restart. Under `pipefail`, `cmd | grep -q` can fail with SIGPIPE even on a
+match; use `grep … >/dev/null`.
 
 ---
 
@@ -1019,6 +1244,17 @@ class MyStrategy(IStrategy):
 
 Provides `IntParameter`, `DecimalParameter`, `CategoricalParameter`, `BooleanParameter` descriptors for hyperopt parameter declaration.
 
+Parameter values are **per strategy instance** (upstream freqtrade a5a652214, ported
+2026-11-11). `HyperStrategyMixin.__init__` deep-copies every class-level Parameter onto the
+instance (`_ft_copy_parameters`). Before that, a base class imported from another module
+(e.g. `risk_management.NablaRegimeFilter`, used by 8 auto_start bots) was one shared class
+object, so under `single_process_mode`/fleet workers the last bot to load set the values for
+all of them. Always read parameters as `self.<param>.value`, never through the class
+(`MyStrategy.<param>.value` / `type(self).<param>`): those are the untouched defaults. The same
+goes for setting values from a harness: set them on the instance after construction.
+`<space>_params` dicts are deep-copied before merging, because `deep_merge_dicts` writes into
+its destination.
+
 ### parameters.py
 
 `HyperoptParameter` base class and the concrete `IntParameter`, `DecimalParameter`, `CategoricalParameter`, `BooleanParameter` implementations with `optimize`, `value`, and `in_space` helpers.
@@ -1048,6 +1284,102 @@ Converts legacy Freqtrade v2 strategy syntax to v3 (`StrategyUpdater`).
 `StrategyResolver.load_strategy(config)` searches `user_data/strategies/` (and `strategy_path` if set) for the class named by `config["strategy"]`, imports it, validates `INTERFACE_VERSION`, and returns an instance.
 
 ---
+
+## VolML — volatility-forecast breakout strategy (`user_data/strategies/VolML/`)
+
+`VolML` (class in `VolMLStrategy.py`) is an `IStrategy` on top of the `volml`
+package beside it: a HAR + LightGBM multi-horizon realized-volatility
+forecaster. Read `VolML/agents.md` before touching the model — it records what
+was measured and rejected. This section is only the VulcanTrader integration.
+
+### What it trades
+
+Every hour the forecast sizes a barrier `b = clip(k·σ̂·√h, floor, cap)` around the
+bar's close; the arm lives `h`=12 hours; a 15m candle that **closes** through the
+nearest live level enters long/short at the next open as a taker. Exits: ROI,
+stop, max hold. `timeframe="15m"`, `can_short=True`, `leverage()` = 1.0 by default.
+The forecast sets *how far* a real move is, never the direction.
+
+It is **not** `volml/strategy.py`'s resting-limit straddle: an exchange fills a
+buy limit above the ask immediately, so "a limit that fills when price reaches it"
+only exists in a backtest. `volml/breakout.py` expresses the same trade as levels
+that have actually been crossed. Expect worse numbers than that script printed.
+
+### Second mode: resting limit orders (`"volml": {"entry_mode": "limit_fade", ...}`)
+
+Rest a limit order `limit_offset` (default 5%) from price, cancel it after `forecast_horizon`
+hours, re-place it whenever the pair is flat; `min_touch_prob` optionally gates placement on
+the model's chance of reaching ±offset (0 = always place). **It can only be the passive
+orientation** — buy limit *below* price (`limit_side: "long"`), short limit *above*
+(`"short"`): `backtesting.py::get_valid_entry_price_and_stake` clamps a long limit to the
+candle high ("otherwise it'd be a stop limit entry, which VulcanTrader does not support in
+live"), so "long 5% above" cannot rest. It is therefore a fade, not a breakout. One position
+per pair means a two-sided straddle is two bots, one per side (as the research script's
+independent long/short runs were).
+The strategy overwrites `unfilledtimeout.entry` with the horizon in this mode: configs cloned
+from `configHyper` carry 25 minutes, which cancels a 5% limit long before it can fill, with
+no error. Use `max_open_trades` ≥ the panel size (pending orders occupy slots) and a small
+stake. Measured results and the verdict are in `VolML/agents.md`.
+
+**Simulation hazards for `limit_fade` (each cost a wrong conclusion here):** (1) the engine
+checks `high >= ROI target` with no regard to candle-internal order, so a limit that fills
+mid-candle can "buy at the low, sell at the earlier high" — `roi_skip_fill_candle` (default
+True) forbids ROI on the fill candle; turn it off and 10% of trades round-trip in one candle,
+more than all the profit. (2) The engine's trade clock (`trade_dur`, ROI tiers, `max_hold`)
+starts at order **placement**; `exit_clock: "fill"` counts from the fill. (3) Strategy
+callbacks receive **copies** of `Trade` — mutating `trade.open_date` etc. in a callback does
+nothing; override `min_roi_reached_entry` instead, which both `should_exit` and the
+backtester's exit pricing call. (4) `minimal_roi` must have **string** keys (the config
+schema rejects ints).
+
+Default exits are ROI 3% / `stop` **0.30** / 48h max hold. 30% was a deliberate choice from a
+stop grid (see `VolML/agents.md`), not a finding that it is better than 2–4%; at 30% the max
+hold does most of the stopping. `breakout_close` was only backtested at `stop` 0.02.
+
+### Files
+
+| File | Role |
+|---|---|
+| `VolMLStrategy.py` | the `IStrategy`; options under a top-level `"volml"` key in the bot config |
+| `volml/breakout.py` | pure level/signal logic, no VulcanTrader imports; `tests/test_volml_breakout.py` |
+| `volml/forecast.py` | `Forecaster`: scores in-memory 1m tapes by *replaying* `build_panel`'s steps |
+| `volml/service.py` | `ForecastService` singleton: cached whole-history table (backtest), hourly background refresh (dry-run/live) |
+| `volml_out/model/` | trained model + `symbols.json` (the `symbol_id` map) + `oos.json` (held-out boundary) |
+| `volml_cache/` | cached panels and forecast tables, rebuilt automatically when model/data change |
+
+### Operating it
+
+```bash
+# train (hourly grid; ~25 min on 60 symbols). Data dir = the folder holding *-1m-futures.feather
+cd user_data/strategies/VolML && python -m volml.test_causality   # gate, see volml/agents.md
+python -m volml.train --data-dir ../../data/hyperliquid/futures --out volml_out \
+    --symbols <names like BTC_USDC_USDC ...> --folds 3 --rounds 2500 --quiet --min-hours 4320
+# backtest ONLY on the held-out window (oos.json: test_start), never before it
+python -m VulcanTrader.bot backtest -c configBotVolML -s VolML --timerange 20260607-20260802
+```
+
+`lightgbm` is a runtime dependency of the strategy (imported by `volml.model`).
+Panel symbols come from `symbols.json`; a whitelist pair outside it never trades.
+
+### Invariants worth keeping (each one cost something to find)
+
+- **Never use `sigma_source: "model"` results from before `oos.json:test_start` as
+  evidence** — the forecaster was fitted on that period. The strategy logs this at
+  start-up. `sigma_source: "har"` / `"trail"` are the controls: same strategy, only the
+  volatility input changes.
+- **Live needs ≥ 90 days of 1m history per symbol** (measured: 45d and 65d windows
+  silently disagree with the backtest on the seasonal block; 90d/100d agree to ≤0.006
+  log-vol). Hyperliquid only serves ~5000 recent 1m candles (~3.4 days), so that history
+  must already be in the local archive; `service.py` bridges at most 60h and otherwise
+  excludes the symbol, and publishes nothing at all below 80% of the panel (no new arms →
+  strategy stands down). A stale archive therefore means "does not trade", not "trades on
+  a bad forecast".
+- **The forecast tail is padded forward** (`Forecaster.symbol_frame`) because
+  `seas_fwd_*` uses `shift(-h)`; without padding the newest bars get NaN and the HAR
+  anchor silently falls back to its training median, so live would disagree with the
+  backtest. Do not remove it.
+- Arms are visible from their **decision time** (bar open + 1 bar), never from the
+  bar's open; tests mutate this and fail (`tests/test_volml_breakout.py`).
 
 ## config/
 
@@ -1176,7 +1508,9 @@ Never call `Trade.session.add()` / `Trade.commit()` from background threads with
 | `run-paper.bat` / `run-paper.sh` | Dry-run paper trading |
 | `run-app.bat` / `run-app.sh` | Web portal standalone (`python -m VulcanTrader.bot webserver`) |
 | `main.py` | Same as `run-app`'s underlying command, run directly: `python main.py [--port ...]`. Whether the fleet it starts spawns subprocesses or runs everything in this one process is controlled by `single_process_mode` in `configs_system/system.json`, not by which of these you use. |
-| `install.bat` / `install.sh` | Create `.venv` and install deps |
+| `scripts/top_strategies_report.py` | PDF report on the top N (default 20) profitable strategies on Hyperliquid and on NinjaTrader - one tear sheet each (every metric on trading.html's Performance Metrics card + equity curve, drawdown, hourly PF) → `user_data/reports/top_strategies_<ts>.pdf`. Run it directly (`python scripts/top_strategies_report.py [flags]`; it was `report-top-strategies.sh` until that wrapper was folded in). Env `TOP`/`MIN_TRADES`/`OUT` set the flag defaults and a flag wins; if the Python running it has no matplotlib it re-runs itself under the repo `.venv`. `--self-test` runs its built-in unit tests. Source is `user_data/accounts/*.json` (what the Trading page reads); "NinjaTrader" = the `configRithmicCFD*` bots (exchange `futuressim` - nothing has ever run on the real `ninjatrader` exchange), overridable with `--nt-pattern`. Metrics are a line-for-line port of trading.html's `tradingApp()`, including its drawdown-peak convention (peak starts at the first closed trade's equity, not starting capital) - keep the two in sync. Each strategy's newest standard backtest (`<Strategy>-YYYY-MM-DD_HH-MM-SS.json` under `user_data/backtest_results`, recursive; `--backtest-dir` adds folders) gets its own page after its paper sheet - lookup only, the report never runs one. `maemfe_baselines/<Strategy>.json` are exit-neutralised MAE/MFE calibration runs (the `mae_calibration_file` of the AdaptiveMAEMFE mixin), NOT backtests, and are excluded. Headers use Cinzel (crimson) from `trading-research-papers/fonts`, sub-headers/bars brown; brown vs crimson fails the CVD check, so no chart separates series by that pair alone. Matplotlib-only (no reportlab in the venv). |
+| `install.bat` / `install.sh` | Create `.venv`, install deps, build the Rust crate; then ask about optional components (default no; preset with `--with-ninjatrader` / `--without-ninjatrader` or `INSTALL_NINJATRADER=yes\|no`). Saying yes runs `setup-ninjatrader.{bat,sh} guided` (installs NT8 and compiles the bridge). If NT8 is already installed and no flag is given, there is no question: `… addon-if-needed` recompiles the bridge only if the repo copy changed (deployed `.cs` differs, or the DLL is older than it). A failure there never fails the core install |
+| `setup-ninjatrader.sh` / `setup-ninjatrader.bat` | NinjaTrader 8 + VulcanTraderBridge for the `ninjatrader` exchange: Linux under Wine (`guided`, or the individual steps, `doctor`); Windows native (`guided` / `install` / `addon` / `doctor`). See "NinjaTrader 8 on Linux (Wine)" |
 
 Environment variables `CONFIG`, `STRATEGY`, `DB_URL` override defaults in all run scripts.
 
@@ -1195,7 +1529,10 @@ python -m unittest discover -s tests -v
 |---|---|
 | `test_persistence_single_process.py` | `PersistenceContext` isolation across concurrent threads, `start_thread_with_context` propagation, same-path/same-thread reinit reuse, second-writer rejection, `release_writer_lock()` regression |
 | `test_persistence_integrity.py` | All five model types isolated (not just `Trade`) across many bots, save→reload round-trip fidelity (incl. two bots "restarting" concurrently), a real bot's own trade-loop-writes/dashboard-reads concurrency pattern under load, atomic-write crash-safety (failed snapshot leaves the live file untouched, no stray tmp file), corrupt-file recovery isolation between bots, `_replace_with_retry`'s Windows sharing-violation retry |
+| `test_volml_breakout.py` | VolML arm/level/signal logic — causality (changing the future must not move the past), arm lifetime, decision-time visibility; needs `lightgbm` importable (the `volml` package imports its model eagerly) |
+| `test_freqtrade_port_20261111.py` | Upstream freqtrade fixes ported 2026-11-11: Hyperliquid fill amount/date from trades for capped reduce-only orders, startup order sync's 5-day "assume cancelled" age check, order funding fee not reset on re-processing, `recalc_trade_from_orders` realized profit (funding fees per partial exit, zero profit resets a stale value), candle refresh gate (see "Candle refresh gate" under Multi-bot fleet control), funding-history paging, fee never None, entry-cancel min stake with DCA, `stoploss_from_absolute` unclamped, CAGR overflow, backtest DCA stake limits with leverage, backtest pair-lock expiry, per-instance strategy parameters (no leak through imported base classes), emergency exit without an order price, shutdown KeyError, `ccxt_config` credentials redacted/removed |
 | `test_bot_single_process_launcher.py` | `launch_bot_in_process`/`stop_in_process_bot`/`in_process_bot_running`/`stop_all_in_process_bots` registry mechanics — mocks out `run_bot_lifecycle` itself so these run fast and offline, no exchange/network needed |
+| `scripts/top_strategies_report.py --self-test` | Built into the script (was `tests/test_top_strategies_report.py`), so `unittest discover -s tests` does NOT run it; also `python -m unittest scripts.top_strategies_report -v`. Covers: metric port vs hand-computed trading.html values (Sharpe/Sortino/SQN/CAGR cap/drawdown convention/hourly PF), account grouping + ranking + `--min-trades`, backtest lookup rules (newest wins, calibration baselines/meta ignored, empty-run fallback), and a real PDF render smoke test |
 
 None of this replaces a live check when touching `single_process_mode` or
 `persistence/`: run `main.py` (or `webserver` with `single_process_mode:
