@@ -216,6 +216,30 @@ def _to_nt_instrument(alias: str) -> str:
     return alias.replace("-", " ", 1)
 
 
+def _bar_open_ms(close_ts_ms: int, timeframe: str) -> int:
+    """Candle label for an NT8 bar.
+
+    NT8 stamps a time-based bar with its CLOSE time (ZC 15m: the session's first bar
+    is 01:15, the 5-minute session-end bar 19:20; a still-forming bar carries its
+    scheduled close). freqtrade - and every backtest of NT8 history - labels a
+    candle by its OPEN, so live strategies saw every bar one bar late (session VWAP
+    resets, opening ranges, hour filters). Label = the timeframe-grid slot holding
+    the bar's last instant, `floor((close - 1 ms) / tf) * tf` - the same rule the NT8
+    history used for backtests is relabelled with. Session-aligned bars that land in
+    one slot (e.g. 4h bars either side of the grains' 13:45-14:30 break) are merged
+    by `_merge_bar_parts`.
+    """
+    tf = timeframe_to_msecs(timeframe)
+    return ((int(close_ts_ms) - 1) // tf) * tf if tf > 0 else int(close_ts_ms)
+
+
+def _merge_bar_parts(label: int, parts: dict[int, list[float]]) -> list[float]:
+    """One candle from the NT8 bars (keyed by their own close stamp) sharing `label`."""
+    first, last = parts[min(parts)], parts[max(parts)]
+    return [label, first[1], max(p[2] for p in parts.values()), min(p[3] for p in parts.values()),
+            last[4], sum(p[5] for p in parts.values())]
+
+
 def _to_alias(nt_instrument: str) -> str:
     """Inverse of `_to_nt_instrument` - applied to every "instrument" field
     read off an incoming AddOn message before it's used as a cache key or
@@ -237,6 +261,9 @@ class _NinjaTraderBridge:
 
         self._lock = RLock()
         self._bars: dict[tuple[str, str], deque] = {}
+        # Per (instrument, timeframe): the newest candle label and the NT8 bars (by their
+        # own close stamp) merged into it - see `_bar_open_ms`.
+        self._bar_parts: dict[tuple[str, str], tuple[int, dict[int, list[float]]]] = {}
         self._last_price: dict[str, tuple[float, int]] = {}
         self._subscribed_bars: set[tuple[str, str]] = set()
         self._subscribed_ticks: set[str] = set()
@@ -417,12 +444,32 @@ class _NinjaTraderBridge:
         except (KeyError, TypeError, ValueError):
             logger.debug(f"Ninjatrader bridge: malformed bar payload: {msg}")
             return
+        try:
+            label = _bar_open_ms(row[0], timeframe)
+        except Exception:
+            logger.debug(f"Ninjatrader bridge: unknown timeframe in bar payload: {msg}")
+            return
+        key = (instrument, timeframe)
         with self._lock:
-            buf = self._bars.setdefault((instrument, timeframe), deque(maxlen=_BUFFER_LEN))
-            if buf and buf[-1][0] == row[0]:
-                buf[-1] = row
+            buf = self._bars.setdefault(key, deque(maxlen=_BUFFER_LEN))
+            cur_label, parts = self._bar_parts.get(key, (None, {}))
+            if label == cur_label:
+                parts[row[0]] = row          # same NT bar updated, or a 2nd bar in this slot
+            elif cur_label is None or label > cur_label:
+                parts = {row[0]: row}
+                self._bar_parts[key] = (label, parts)
             else:
-                buf.append(row)
+                parts = {row[0]: row}        # late update of an older bar (MinIndex < MaxIndex)
+            candle = _merge_bar_parts(label, parts)
+            if buf and buf[-1][0] == label:
+                buf[-1] = candle
+            elif not buf or buf[-1][0] < label:
+                buf.append(candle)
+            else:
+                for i in range(len(buf) - 1, max(-1, len(buf) - 8), -1):
+                    if buf[i][0] == label:
+                        buf[i] = candle
+                        break
 
     def _on_tick(self, msg: dict[str, Any]) -> None:
         instrument = msg.get("instrument")
@@ -656,6 +703,18 @@ class _NinjaTraderBridge:
                     )
                 except (IndexError, TypeError, ValueError):
                     continue
+            # NT8 close stamps -> open-time candle labels (see `_bar_open_ms`).
+            grouped: dict[int, dict[int, list[float]]] = {}
+            for r in rows:
+                grouped.setdefault(_bar_open_ms(r[0], timeframe), {})[r[0]] = r
+            rows = [_merge_bar_parts(lbl, parts) for lbl, parts in sorted(grouped.items())]
+            if grouped:
+                last_label = max(grouped)
+                with self._lock:
+                    cur = self._bar_parts.get(key)
+                    if cur is None or cur[0] <= last_label:
+                        # Live updates of that (possibly still forming) slot merge onto it.
+                        self._bar_parts[key] = (last_label, dict(grouped[last_label]))
             self._record_backfill(key, since_ms, bool(rows))
             # Merged here, on the feed's loop, so every caller sharing this
             # request (see below) gets the merged buffer back.
@@ -1061,7 +1120,10 @@ class NinjatraderCCXTAdapter:
         if bridge.backfill_needed(symbol, timeframe, start_ms, first_use, bool(buffered)):
             buffered = await bridge.backfill_ohlcv(symbol, timeframe, start_ms, now_ms)
 
-        rows = [row for row in buffered if row[0] >= start_ms]
+        # Only completed candles. The bridge streams the still-forming bar on every tick, and
+        # this exchange declares `ohlcv_partial_candle: False`, so without this the strategy's
+        # last row was a seconds-old partial candle - backtests never see one.
+        rows = [row for row in buffered if row[0] >= start_ms and row[0] + tf_ms <= now_ms]
         if limit is not None:
             rows = rows[-candle_limit:]
         return rows

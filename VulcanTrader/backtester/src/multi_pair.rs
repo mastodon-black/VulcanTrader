@@ -986,13 +986,20 @@ fn do_exit_check(cfg: &EngineConfig, p: &mut PairState, i: usize, callbacks: &mu
             let side_1 = if is_long { 1.0 } else { -1.0 };
             let roi_rate = base_price * roi_pct;
             let open_fee_rate = side_1 * base_price * (1.0 + side_1 * fee_open);
-            // Solving exactly for a futures pair would need the fee AT the
-            // still-unknown solved price; `open_i` (this bar's own open) is a
-            // close-enough proxy - the real fee charged at whatever price the
-            // fill actually clamps to below still goes through `fill_fee`.
+            // A flat $/contract fee's RATE depends on the still-unknown solved
+            // price: solve at this bar's open, then refine once at the solved
+            // price (the rate is ~1e-4, so one step converges). Matches the
+            // joint simulator's solve in rust_backtest.py. The fee actually
+            // charged at whatever price the fill clamps to still goes through
+            // `fill_fee`.
             let fee_roi_solve = futures_fee_override(p.input.fee_per_contract, p.input.contract_size, open_i)
                 .unwrap_or(cfg.fee_taker as f64);
             let mut raw_close = -(roi_rate + open_fee_rate) / (fee_roi_solve - side_1);
+            if raw_close > 0.0 {
+                if let Some(f) = futures_fee_override(p.input.fee_per_contract, p.input.contract_size, raw_close) {
+                    raw_close = -(roi_rate + open_fee_rate) / (f - side_1);
+                }
+            }
             // Fix #3: if this is exactly the bar a new tighter ROI tier took
             // effect AND the open already gapped through the solved close
             // rate, use the open instead.

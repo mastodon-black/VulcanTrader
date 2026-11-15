@@ -272,14 +272,59 @@ class Backtesting:
         if self.__initial_backtest:
             logger.info(msg)
 
+    def _fee_per_contract(self, pair: str) -> tuple[float, float]:
+        """(fee_per_contract, contract_size) when the exchange charges a flat $ per contract
+        per side (Futuressim/Rithmic/Ninjatrader expose `get_fee_per_contract`), else (0.0, 1.0)."""
+        cache = self.__dict__.setdefault("_fpc_cache", {})
+        if pair not in cache:
+            fpc, cs = 0.0, 1.0
+            fpc_fn = getattr(self.exchange, "get_fee_per_contract", None)
+            if callable(fpc_fn):
+                try:
+                    fpc = float(fpc_fn(pair) or 0.0)
+                    if fpc > 0.0:
+                        cs = float(self.exchange.get_contract_size(pair) or 1.0) or 1.0
+                except Exception:
+                    logger.debug("get_fee_per_contract(%s) failed", pair, exc_info=True)
+                    fpc, cs = 0.0, 1.0
+            cache[pair] = (fpc, cs)
+        return cache[pair]
+
+    def _trade_fee(self, pair: str, price: float | None) -> float:
+        """Fee RATE for one fill of `pair` at `price`.
+
+        A flat $/contract commission (CME futures) is a fixed dollar amount, so its rate
+        is `fee_per_contract / (price * contract_size)` at each fill - as live
+        (`trader_bot` prices the entry fee at the fill and re-prices `fee_close` at the
+        exit). It wins over the config `fee`, as it does live. Every other exchange
+        keeps the run's single resolved `self.fee`.
+        """
+        fpc, cs = self._fee_per_contract(pair)
+        if fpc > 0.0 and price and price > 0.0:
+            return fpc / (price * cs)
+        return self.fee
+
     def set_fee(self):
+        per_contract = [p for p in self.pairlists.whitelist if self._fee_per_contract(p)[0] > 0.0]
+        if per_contract:
+            self.log_once(
+                f"Using flat $/contract fees for {len(per_contract)} pair(s), priced at each fill "
+                f"(e.g. {per_contract[0]}: ${self._fee_per_contract(per_contract[0])[0]:.2f}/contract/side)."
+            )
         if self.config.get("fee", None) is not None:
             self.fee = self.config["fee"]
-            self.log_once(f"Using fee {self.fee:.4%} from config.")
+            self.log_once(f"Using fee {self.fee:.4%} from config"
+                          + (" for pairs without a $/contract fee." if per_contract else "."))
         else:
+            # get_fee() at its default price=1 turns a $/contract fee into nonsense
+            # (ZC: 4.5%/side), so only ask about a pair that is charged a percentage.
+            pct_pairs = [p for p in self.pairlists.whitelist if p not in per_contract]
+            if not pct_pairs:
+                self.fee = 0.0  # unused: every pair is charged per contract
+                return
             fees = [
                 self.exchange.get_fee(
-                    symbol=self.pairlists.whitelist[0],
+                    symbol=pct_pairs[0],
                     taker_or_maker=mt,
                 )
                 for mt in ("taker", "maker")
@@ -970,6 +1015,8 @@ class Backtesting:
         if self.handle_similar_order(trade, close_rate, amount, trade.exit_side, exit_candle_time):
             return None
 
+        # A $/contract fee is a different rate at the exit price than at entry.
+        trade.fee_close = self._trade_fee(trade.pair, close_rate)
         order = Order(
             id=self.order_id_counter,
             ft_trade_id=trade.id,
@@ -990,7 +1037,7 @@ class Backtesting:
             amount=amount,
             filled=0,
             remaining=amount,
-            cost=amount * close_rate * (1 + self.fee),
+            cost=amount * close_rate * (1 + trade.fee_close),
             ft_order_tag=exit_reason,
         )
         order._trade_bt = trade
@@ -1240,8 +1287,8 @@ class Backtesting:
                     stake_amount=stake_amount,
                     amount=0,
                     amount_requested=amount,
-                    fee_open=self.fee,
-                    fee_close=self.fee,
+                    fee_open=self._trade_fee(pair, propose_rate),
+                    fee_close=self._trade_fee(pair, propose_rate),
                     is_open=True,
                     enter_tag=entry_tag,
                     timeframe=self.timeframe_min,
@@ -1286,7 +1333,7 @@ class Backtesting:
                 amount=amount,
                 filled=0,
                 remaining=amount,
-                cost=amount * propose_rate * (1 + self.fee),
+                cost=amount * propose_rate * (1 + self._trade_fee(pair, propose_rate)),
                 ft_order_tag=entry_tag,
             )
             order._trade_bt = trade

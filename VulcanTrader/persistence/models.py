@@ -360,6 +360,20 @@ def _load_snapshot(path: Path, ctx: PersistenceContext) -> None:
             o._trade_live = parent
             parent.orders.append(o)
 
+    # Orders left behind by the pre-2026-11-14 Trade.delete() bug still carry the id of their
+    # deleted trade. Trade ids are otherwise allocated from the highest LOADED trade id, so a
+    # new trade could take one of those ids, and the next reload would attach the stale order
+    # to it as an open entry order. Keep new trade ids above every id an order refers to.
+    referenced = [o.ft_trade_id for o in Order._instances() if isinstance(o.ft_trade_id, int)]
+    if referenced:
+        ctx._next_id[Trade] = max(ctx._next_id.get(Trade, 1), max(referenced) + 1)
+    orphaned = sum(1 for o in Order._instances() if o.ft_trade_id not in trades_by_id)
+    if orphaned:
+        logger.warning(
+            "%s: %d order(s) belong to no trade (left by an old Trade.delete() bug); "
+            "they are kept as-is, and new trade ids start above them.", path.name, orphaned,
+        )
+
     for row in locks_raw:
         try:
             lock = PairLock.from_dict(row)

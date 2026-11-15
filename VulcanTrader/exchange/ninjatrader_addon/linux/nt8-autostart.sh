@@ -55,6 +55,23 @@ HEALTH_INTERVAL="${HEALTH_INTERVAL:-30}"
 # NT8_REQUIRE_BRIDGE=0: success once logged in + Simulation picked (used for
 # NT8's very first launch, before the AddOn has been compiled).
 NT8_REQUIRE_BRIDGE="${NT8_REQUIRE_BRIDGE:-1}"
+# Headless NT8 needs no charts, and under Wine they're harmful: the stock
+# "Getting Started" workspace opens 2 chart windows whose Direct2D rendering
+# (black on Xvfb/llvmpipe) made NinjaTrader.exe grow ~1.1 GB/h (25 GB of swap in
+# ~22 h, seen 2026-11-10..12) while logging ~380 d2d fixme lines/s. Each launch
+# makes NT8 open an empty "VulcanTrader Headless" workspace instead (Control
+# Center only). NT8_HEADLESS_WORKSPACE=0 keeps whatever workspace NT8 restores.
+NT8_HEADLESS_WORKSPACE="${NT8_HEADLESS_WORKSPACE:-1}"
+HEADLESS_WORKSPACE_NAME="VulcanTrader Headless"
+# Wine debug channels for NT8: fixme messages off (they were ~99% of a 100 MB/day
+# log), errors and warnings kept for diagnosis.
+NT8_WINEDEBUG="${NT8_WINEDEBUG:-fixme-all}"
+# For this long after a launch, "no NinjaTrader.exe process yet" is not a
+# failure: on a heavily loaded box the backgrounded wine can take seconds to
+# exec, and the window wait used to give up within 1 s of launching (seen
+# 2026-11-12: three attempts "failed" in 15 s).
+LAUNCH_GRACE_S="${LAUNCH_GRACE_S:-45}"
+LAUNCHED_AT=0
 # Memory preflight. NT8 is ~1.4 GB RSS once connected with data.
 NT8_EXPECTED_MB="${NT8_EXPECTED_MB:-1500}"     # warn if MemAvailable below this
 NT8_MIN_TOTAL_MB="${NT8_MIN_TOTAL_MB:-2000}"   # refuse if MemAvailable+SwapFree below this
@@ -62,7 +79,10 @@ MAX_MEM_PSI_FULL="${MAX_MEM_PSI_FULL:-10}"     # refuse if memory 'full' PSI avg
 LOGIN_DIALOG_WIDTH=378
 MODE_PICKER_WIDTH=902
 
-log() { printf '[nt8-autostart] %s\n' "$1"; }
+# stderr, not stdout: some functions return a value on stdout (a window id via
+# $(...)), and a log line from inside one of them used to get captured into
+# that value - seen 2026-11-12, it sent the login clicks to a bogus window.
+log() { printf '[nt8-autostart] %s\n' "$1" >&2; }
 die() { printf '[nt8-autostart] ERROR: %s\n' "$1" >&2; exit 1; }
 xdo() { DISPLAY="$DISPLAY_NUM" timeout 10 xdotool "$@"; }
 
@@ -159,20 +179,66 @@ kill_nt8() {
     done
 }
 
+ensure_headless_workspace() {
+    [[ "$NT8_HEADLESS_WORKSPACE" == 1 ]] || return 0
+    local docs ws
+    docs="$(WINEPREFIX="$WINEPREFIX" winepath -u "C:\\users\\$(id -un)\\Documents" 2>/dev/null | tr -d '\r')"
+    ws="${docs%/}/NinjaTrader 8/workspaces"
+    # NT8 creates this folder on its first start; until then there's nothing to steer.
+    [[ -d "$ws" ]] || return 0
+    local f="$ws/${HEADLESS_WORKSPACE_NAME}.xml" idx="$ws/_Workspaces.xml"
+    if [[ ! -f "$f" ]]; then
+        printf '\xef\xbb\xbf<?xml version="1.0" encoding="utf-8"?>\r\n<NinjaTrader>\r\n\t<NTWindows>\r\n\t</NTWindows>\r\n</NinjaTrader>\r\n' > "$f"
+    fi
+    if ! grep -q "<ActiveWorkspace>${HEADLESS_WORKSPACE_NAME}</ActiveWorkspace>" "$idx" 2>/dev/null \
+        || grep "<OpenWorkspace>" "$idx" 2>/dev/null | grep -vq "${HEADLESS_WORKSPACE_NAME}"; then
+        [[ -f "$idx" && ! -f "$idx.before-headless" ]] && cp -p "$idx" "$idx.before-headless"
+        printf '\xef\xbb\xbf<?xml version="1.0" encoding="utf-8"?>\r\n<NinjaTrader>\r\n  <OpenWorkspaces>\r\n    <OpenWorkspace>%s</OpenWorkspace>\r\n  </OpenWorkspaces>\r\n  <ActiveWorkspace>%s</ActiveWorkspace>\r\n</NinjaTrader>\r\n' \
+            "$HEADLESS_WORKSPACE_NAME" "$HEADLESS_WORKSPACE_NAME" > "$idx"
+        log "Workspace set to '${HEADLESS_WORKSPACE_NAME}' (no charts - their Direct2D rendering leaks under Wine)."
+    fi
+}
+
 launch_nt8() {
     log "Launching NinjaTrader 8 under Wine..."
-    WINEPREFIX="$WINEPREFIX" DISPLAY="$DISPLAY_NUM" wine "$NT8_EXE" > "$WINE_LOG" 2>&1 &
+    ensure_headless_workspace
+    WINEPREFIX="$WINEPREFIX" DISPLAY="$DISPLAY_NUM" WINEDEBUG="$NT8_WINEDEBUG" wine "$NT8_EXE" > "$WINE_LOG" 2>&1 &
     disown
+    LAUNCHED_AT=$(date +%s)
+}
+
+# Gone = no NinjaTrader.exe process AND past the post-launch grace period.
+nt8_gone() {
+    nt8_running && return 1
+    (( $(date +%s) - LAUNCHED_AT > LAUNCH_GRACE_S ))
 }
 
 find_window() {
     xdo search --onlyvisible --name "$1" 2>/dev/null | tail -n1 || true
 }
 
+# Dialogs NT8 can raise before the login window; each is dismissed with the
+# choice that keeps the current setup unchanged.
+dismiss_blocking_dialogs() {
+    local w
+    # "Update Available - NinjaTrader x.y.z is available" (300x145): Skip is at
+    # window-relative (139,123). Upgrading NT8 under Wine (and recompiling the
+    # bridge against it) is a manual decision, never automatic.
+    w="$(find_window "^Update Available$")"
+    if [[ -n "$w" ]]; then
+        log "NinjaTrader update offered - clicking Skip (update manually if wanted)."
+        xdo windowactivate "$w" >/dev/null 2>&1 || true
+        sleep 1
+        click_at "$w" 139 123 || log "Click on the update dialog failed."
+        sleep 2
+    fi
+}
+
 wait_for_stable_window() {
     # Up to $2 s for a visible window titled $1 whose id survives a settle delay.
     local name="$1" wtimeout="$2" waited=0 winid again
     while (( waited < wtimeout )); do
+        dismiss_blocking_dialogs
         winid="$(find_window "$name")"
         if [[ -n "$winid" ]]; then
             sleep 3
@@ -184,7 +250,7 @@ wait_for_stable_window() {
             waited=$((waited + 3))
             continue
         fi
-        nt8_running || return 1
+        nt8_gone && return 1
         x_socket_live || return 1
         sleep 2
         waited=$((waited + 2))
@@ -334,11 +400,34 @@ supervise() {
     done
 }
 
+# Run straight from a shell (not by systemd), NT8 would become a child of that
+# shell's login session with no memory cap - exactly how an uncapped NT8 grew
+# to 21 GB on 2026-11-11/12 after a direct run. So a one-shot run from a shell
+# hands the launch to VulcanTrader's launcher, which starts this same script
+# inside the memory-capped user unit (vulcantrader-ninjatrader) and waits for
+# the bridge. Runs under systemd (INVOCATION_ID set: the capped user unit or the
+# supervised boot unit) proceed here. NT8_ALLOW_UNCAPPED=1 forces a run in place
+# (setup-ninjatrader.sh's short first launch, or a box without user systemd).
+delegate_to_capped_unit() {
+    [[ -n "${INVOCATION_ID:-}" || "${NT8_ALLOW_UNCAPPED:-0}" == 1 ]] && return 0
+    local repo launcher py
+    repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+    launcher="$repo/VulcanTrader/util/ninjatrader_launcher.py"
+    if [[ ! -f "$launcher" ]] || ! command -v systemd-run >/dev/null || [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+        log "WARNING: no user systemd here - NinjaTrader will run in this session WITHOUT a memory cap."
+        return 0
+    fi
+    py=python3; [[ -x "$repo/.venv/bin/python" ]] && py="$repo/.venv/bin/python"
+    log "Started from a shell, not systemd: handing the launch to the memory-capped user unit (NT8_ALLOW_UNCAPPED=1 runs it here instead)."
+    exec "$py" -I "$launcher" --start --wait
+}
+
 main() {
     case "${1:-}" in
         --stop) kill_nt8; exit 0 ;;
         --supervise) load_prereqs; supervise ;;
     esac
+    delegate_to_capped_unit
     load_prereqs
     if nt8_running; then
         log "NinjaTrader.exe already running; skipping launch/login."

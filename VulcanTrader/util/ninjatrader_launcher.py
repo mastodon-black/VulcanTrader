@@ -177,8 +177,10 @@ def plan_start(system_cfg: dict[str, Any] | None) -> tuple[str, list[str] | None
         return "starting NinjaTrader (Windows: log in to it yourself)", [exe]
 
     if sys.platform.startswith("linux"):
-        if not os.access(LINUX_LAUNCHER, os.X_OK):
-            return f"launcher missing/not executable: {LINUX_LAUNCHER}", None
+        # Run via bash, not the +x bit: restoring the repo from a zip backup drops
+        # executable bits (seen 2026-11-12), which silently broke the launch.
+        if not LINUX_LAUNCHER.is_file():
+            return f"launcher missing: {LINUX_LAUNCHER}", None
         env = {"HOME": os.path.expanduser("~"), "BRIDGE_PORT": str(port)}
         if os.environ.get("NT8_SETTINGS"):
             env["NT8_SETTINGS"] = os.environ["NT8_SETTINGS"]
@@ -191,8 +193,8 @@ def plan_start(system_cfg: dict[str, Any] | None) -> tuple[str, list[str] | None
                    "-p", "OOMPolicy=stop", "-p", "TimeoutStartSec=1500"]
             for k, v in env.items():
                 cmd += ["-E", f"{k}={v}"]
-            return f"starting NinjaTrader via systemd-run --user unit {USER_UNIT} (memory-capped)", cmd + [str(LINUX_LAUNCHER)]
-        return "starting NinjaTrader via nt8-autostart.sh (detached; no user systemd)", [str(LINUX_LAUNCHER)]
+            return f"starting NinjaTrader via systemd-run --user unit {USER_UNIT} (memory-capped)", cmd + ["/bin/bash", str(LINUX_LAUNCHER)]
+        return "starting NinjaTrader via nt8-autostart.sh (detached; no user systemd)", ["/bin/bash", str(LINUX_LAUNCHER)]
 
     return f"starting NinjaTrader is not supported on {sys.platform}", None
 
@@ -271,8 +273,8 @@ def stop(system_cfg: dict[str, Any] | None) -> str:
         if sys.platform.startswith("linux"):
             if boot_unit_supervising():
                 return f"NinjaTrader is supervised by {BOOT_UNIT}: stop it with: sudo systemctl stop {BOOT_UNIT}"
-            if os.access(LINUX_LAUNCHER, os.X_OK):
-                _run([str(LINUX_LAUNCHER), "--stop"], timeout=120)
+            if LINUX_LAUNCHER.is_file():
+                _run(["/bin/bash", str(LINUX_LAUNCHER), "--stop"], timeout=120)
             if _user_unit_state():
                 _systemctl("stop", USER_UNIT, user=True)
                 _systemctl("reset-failed", USER_UNIT, user=True)
@@ -370,7 +372,7 @@ def _self_test() -> int:
         g["nt8_process_running"], g["boot_unit_supervising"] = saved
     print(f"     plan (port {free_port}, NT8 assumed down): {reason}")
     if sys.platform.startswith("linux"):
-        check("linux plan launches the repo nt8-autostart.sh", bool(cmd) and cmd[-1] == str(LINUX_LAUNCHER))
+        check("linux plan launches the repo nt8-autostart.sh via bash", bool(cmd) and cmd[-2:] == ["/bin/bash", str(LINUX_LAUNCHER)])
         if cmd and cmd[0] == "systemd-run":
             joined = " ".join(cmd)
             check("systemd-run plan: one-shot, BRIDGE_PORT, memory caps from settings",
@@ -397,14 +399,60 @@ def _self_test() -> int:
     return 0 if ok else 1
 
 
+def _read_default_system_cfg() -> dict[str, Any]:
+    import json
+    try:
+        data = json.loads(DEFAULT_SYSTEM_JSON.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def start_and_wait(system_cfg: dict[str, Any] | None, timeout_s: float = 900) -> int:
+    """Start NT8 (memory-capped unit on Linux) and block until the bridge
+    listens, the launch unit fails, or `timeout_s` passes. Prints progress;
+    returns a process exit code. Used by setup-ninjatrader.sh and by
+    nt8-autostart.sh when it is run straight from a shell."""
+    print(f"[ninjatrader] {start(system_cfg, watch=False)}", flush=True)
+    host, port = bridge_endpoint(system_cfg)
+    if not is_local_host(host):
+        return 0
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if bridge_listening(host, port):
+            print(f"[ninjatrader] bridge is up on {host}:{port}", flush=True)
+            return 0
+        if sys.platform.startswith("linux") and _user_unit_state() == "failed":
+            print(f"[ninjatrader] launch failed - see: journalctl --user -u {USER_UNIT}", flush=True)
+            return 1
+        time.sleep(5)
+    print(f"[ninjatrader] bridge not up after {timeout_s / 60:.0f} min - see: journalctl --user -u {USER_UNIT}", flush=True)
+    return 1
+
+
 if __name__ == "__main__":
-    # Runnable as a plain script (stdlib only) - the installers use
-    # `python <this file> --auto-start on|off` before/without the package deps.
-    if "--self-test" in sys.argv:
+    # Runnable as a plain script (stdlib only) - the installers/setup use these
+    # modes before (or without) the package's own dependencies being importable.
+    args = sys.argv[1:]
+    if "--self-test" in args:
         logging.basicConfig(level=logging.INFO)
         sys.exit(_self_test())
-    if len(sys.argv) >= 3 and sys.argv[1] == "--auto-start" and sys.argv[2] in ("on", "off"):
-        print(set_auto_start(sys.argv[2] == "on", sys.argv[3] if len(sys.argv) > 3 else DEFAULT_SYSTEM_JSON))
+    if len(args) >= 2 and args[0] == "--auto-start" and args[1] in ("on", "off"):
+        print(set_auto_start(args[1] == "on", args[2] if len(args) > 2 else DEFAULT_SYSTEM_JSON))
+        sys.exit(0)
+    if args[:1] == ["--start"]:
+        logging.basicConfig(level=logging.WARNING, format="[ninjatrader] %(message)s")
+        if "--wait" in args:
+            sys.exit(start_and_wait(_read_default_system_cfg()))
+        print(start(_read_default_system_cfg(), watch=False))
+        sys.exit(0)
+    if args[:1] == ["--stop"]:
+        print(stop(_read_default_system_cfg()))
+        sys.exit(0)
+    if args[:1] == ["--status"]:
+        for key, value in status(_read_default_system_cfg()).items():
+            print(f"{key:22} {value}")
         sys.exit(0)
     print(__doc__)
-    print("Script use: ninjatrader_launcher.py --self-test | --auto-start on|off [system.json]")
+    print("Script use: ninjatrader_launcher.py --self-test | --auto-start on|off [system.json] "
+          "| --start [--wait] | --stop | --status")

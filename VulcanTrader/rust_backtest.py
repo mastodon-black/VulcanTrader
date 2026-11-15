@@ -470,6 +470,9 @@ class _PairState:
         "stop_loss_dist",
         "trailing_activated", "exchange_max_leverage", "precision", "trade_stake", "liq_price",
         "trade_amount", "local_trade", "entry_fee", "fill_intrabar",
+        # Flat $/contract commission (CME-style futures; 0.0 = percentage fee) and the
+        # contract size it is charged per - see `_pair_fee_per_contract`.
+        "fee_per_contract", "contract_size",
         # Resting-order state (all inert unless a limit offset is configured).
         # An entry order holds its already-resolved stake/leverage/amount: those
         # are fixed when the order is PLACED (that's when freqtrade calls
@@ -517,6 +520,8 @@ class _PairState:
         # True when the entry filled INSIDE its bar rather than at the bar's open; see
         # `fill_bar_roi` in `_build_engine_config`.
         self.fill_intrabar = False
+        self.fee_per_contract = 0.0
+        self.contract_size = 1.0
         self.local_trade = None  # the registered LocalTrade while a position is open
         self.pending_entry = False
         self.pending_entry_price = 0.0
@@ -534,6 +539,34 @@ class _PairState:
         self.pending_exit_reason = None
         self.pending_exit_tag = None
         self.pending_exit_order = None
+
+
+def _pair_fee_per_contract(exchange: Any, pair: str) -> tuple[float, float]:
+    """(fee_per_contract, contract_size) for exchanges that charge a flat $ per contract
+    per side (Futuressim/Rithmic/Ninjatrader: `get_fee_per_contract`), else (0.0, 1.0).
+
+    A flat commission is a fixed dollar amount, so as a rate it is
+    `fee_per_contract / (price * contract_size)` at each fill price - never the single
+    config `fee` (one bot's config carried MET's 0.28%/side onto CL/NQ/HG, ~70-700x
+    their real cost) and never `get_fee()` at its default price=1 (4.5%/side on ZC).
+    Same figure the native engine gets via `PairInput.fee_per_contract`.
+    """
+    if exchange is None:
+        return 0.0, 1.0
+    try:
+        get_fpc = getattr(exchange, "get_fee_per_contract", None)
+        fpc = float(get_fpc(pair) or 0.0) if callable(get_fpc) else 0.0
+    except Exception:
+        logger.debug("exchange.get_fee_per_contract(%s) failed", pair, exc_info=True)
+        return 0.0, 1.0
+    if fpc <= 0.0:
+        return 0.0, 1.0
+    try:
+        cs = float(exchange.get_contract_size(pair) or 1.0)
+    except Exception:
+        logger.debug("exchange.get_contract_size(%s) failed", pair, exc_info=True)
+        cs = 1.0
+    return fpc, (cs if cs > 0.0 else 1.0)
 
 
 def _joint_multi_pair_backtest(
@@ -694,6 +727,8 @@ def _joint_multi_pair_backtest(
         exch_max_lev = _pair_exchange_max_leverage(exchange, pair, max_trade_amount, fallback_max_leverage)
         precision = _precision_per_bar(df, dates, exchange, pair)
         pair_states[pair] = _PairState(dates, openp, high, low, atr, el, xl, es, xs, exch_max_lev, precision)
+        pair_states[pair].fee_per_contract, pair_states[pair].contract_size = \
+            _pair_fee_per_contract(exchange, pair)
 
     if not pair_states:
         return [], 0, {}
@@ -1045,7 +1080,7 @@ def _joint_multi_pair_backtest(
             p.pending_entry_bar = i
             # Repricing can move the order across the market, so re-classify
             # the fill it would now get.
-            p.entry_fee = fill_fee(new_price, p.open[i], is_buy=not p.pending_entry_short)
+            p.entry_fee = fill_fee(new_price, p.open[i], is_buy=not p.pending_entry_short, p=p)
             # The amount was sized off the original price; keep the stake
             # constant (freqtrade re-derives the amount from the new rate).
             if new_price > 0:
@@ -1167,7 +1202,7 @@ def _joint_multi_pair_backtest(
         # Decided by where the order was PLACED relative to the market, so it
         # is already correct for the LocalTrade registered below and for every
         # profit calculation once the order fills.
-        p.entry_fee = fill_fee(base_price, p.open[i], is_buy=not is_short)
+        p.entry_fee = fill_fee(base_price, p.open[i], is_buy=not is_short, p=p)
 
         # Register the trade and its OPEN entry order now, at placement — the
         # same point freqtrade's `_enter_trade` does, and what makes the order
@@ -1179,7 +1214,7 @@ def _joint_multi_pair_backtest(
                 trade = LocalTrade(
                     pair=pair, is_short=is_short, amount=0.0, amount_requested=amount,
                     open_rate=base_price, open_rate_requested=base_price,
-                    fee_open=p.entry_fee, fee_close=fee, leverage=lev,
+                    fee_open=p.entry_fee, fee_close=close_fee(p, base_price), leverage=lev,
                     trading_mode=_TradingModeEnum.FUTURES if is_futures else _TradingModeEnum.SPOT,
                     open_date=current_time, is_open=True,
                     stake_amount=actual_stake, max_stake_amount=actual_stake,
@@ -1208,15 +1243,24 @@ def _joint_multi_pair_backtest(
         every order when no offset is configured) always satisfies this."""
         return p.low[i] <= price <= p.high[i]
 
-    def fill_fee(price: float, reference: float, is_buy: bool) -> float:
+    def fill_fee(price: float, reference: float, is_buy: bool, p: _PairState | None = None) -> float:
         """A limit order priced on the favourable side of the market rests on
         the book and ADDS liquidity when it is finally touched -> maker. One
         priced at (or through) the market takes liquidity -> taker. Comparing
         against the bar open covers config-driven offsets and strategy-priced
         orders (custom_entry_price / custom_exit_price / adjust_order_price)
         with a single rule."""
+        if p is not None and p.fee_per_contract > 0.0:
+            return close_fee(p, price)   # CME: same flat $/contract maker or taker
         rests = price < reference if is_buy else price > reference
         return fee_maker if rests else fee
+
+    def close_fee(p: _PairState, price: float) -> float:
+        """Taker rate of a close leg at `price`: the flat `fee`, or - for flat $/contract
+        exchanges - that pair's commission as a rate at this price."""
+        if p.fee_per_contract > 0.0 and price and price > 0.0:
+            return p.fee_per_contract / (price * p.contract_size)
+        return fee
 
     def cancel_entry_order(pair: str, p: _PairState, reason: str) -> None:
         """freqtrade's `check_order_cancel` for an entry with nothing filled:
@@ -1386,11 +1430,11 @@ def _joint_multi_pair_backtest(
             )
         if is_long:
             open_value = amount * base_price * (1.0 + fee_open)
-            close_value_bound = amount * bound * (1.0 - fee) + funding_so_far
+            close_value_bound = amount * bound * (1.0 - close_fee(p, bound)) + funding_so_far
             leveraged_bound_return = ((close_value_bound / open_value) - 1.0) * lev if open_value else 0.0
         else:
             open_value = amount * base_price * (1.0 - fee_open)
-            close_value_bound = amount * bound * (1.0 + fee) - funding_so_far
+            close_value_bound = amount * bound * (1.0 + close_fee(p, bound)) - funding_so_far
             leveraged_bound_return = (1.0 - (close_value_bound / open_value)) * lev if open_value else 0.0
 
         # freqtrade should_exit: `if exit_ and not enter` — a same-direction
@@ -1405,10 +1449,10 @@ def _joint_multi_pair_backtest(
             """Leveraged profit at this bar's open (freqtrade's current_profit at `rate`)."""
             if is_long:
                 ov = amount * base_price * (1.0 + fee_open)
-                cv = amount * open_i * (1.0 - fee) + funding_so_far
+                cv = amount * open_i * (1.0 - close_fee(p, open_i)) + funding_so_far
                 return ((cv / ov) - 1.0) * lev if ov else 0.0
             ov = amount * base_price * (1.0 - fee_open)
-            cv = amount * open_i * (1.0 + fee) - funding_so_far
+            cv = amount * open_i * (1.0 + close_fee(p, open_i)) - funding_so_far
             return (1.0 - (cv / ov)) * lev if ov else 0.0
 
         # freqtrade's should_exit: exit signals and custom_exit only exist when use_exit_signal is on; a raw
@@ -1426,11 +1470,11 @@ def _joint_multi_pair_backtest(
             current_time_ce = pd.Timestamp(p.dates[i]).tz_localize("UTC")
             if is_long:
                 ov_ce = amount * base_price * (1.0 + fee_open)
-                cv_ce = amount * open_i * (1.0 - fee) + funding_so_far
+                cv_ce = amount * open_i * (1.0 - close_fee(p, open_i)) + funding_so_far
                 leveraged_open_return = ((cv_ce / ov_ce) - 1.0) * lev if ov_ce else 0.0
             else:
                 ov_ce = amount * base_price * (1.0 - fee_open)
-                cv_ce = amount * open_i * (1.0 + fee) - funding_so_far
+                cv_ce = amount * open_i * (1.0 + close_fee(p, open_i)) - funding_so_far
                 leveraged_open_return = (1.0 - (cv_ce / ov_ce)) * lev if ov_ce else 0.0
             try:
                 reason_cust = strategy.custom_exit(
@@ -1627,7 +1671,7 @@ def _joint_multi_pair_backtest(
                     reason_tag = custom_tag
                 close_position(pair, p, i, resting_price, exit_reason, reason_tag,
                                current_time_exit, funding_so_far,
-                               fee_close=fill_fee(resting_price, open_i, not is_long))
+                               fee_close=fill_fee(resting_price, open_i, not is_long, p=p))
                 return True
 
             # freqtrade parity: a trailing stop that arms-and-triggers within
@@ -1700,7 +1744,11 @@ def _joint_multi_pair_backtest(
                 # entry rested), not the blanket taker rate; the custom_exit
                 # block above already anchors on `fee_open` for the same reason.
                 open_fee_rate = side_1 * base_price * (1.0 + side_1 * fee_open)
-                raw_close = -(roi_rate + open_fee_rate) / (fee - side_1)
+                raw_close = -(roi_rate + open_fee_rate) / (close_fee(p, base_price) - side_1)
+                if p.fee_per_contract > 0.0 and raw_close > 0.0:
+                    # Flat $/contract: the close leg's RATE depends on the close price
+                    # itself; one refinement at the solved price converges (rate ~1e-4).
+                    raw_close = -(roi_rate + open_fee_rate) / (close_fee(p, raw_close) - side_1)
                 # freqtrade's `_get_close_rate_for_roi`: if this is exactly
                 # the bar a new (tighter) ROI tier takes effect, AND the
                 # candle's own open already exceeds that tier's computed
@@ -1736,11 +1784,11 @@ def _joint_multi_pair_backtest(
                 # evaluated BEFORE custom_exit_price is applied).
                 if is_long:
                     ov_p = amount * base_price * (1.0 + fee_open)
-                    cv_p = amount * base_exit_price * (1.0 - fee) + funding_so_far
+                    cv_p = amount * base_exit_price * (1.0 - close_fee(p, base_exit_price)) + funding_so_far
                     profit_at_close = ((cv_p / ov_p) - 1.0) * lev if ov_p else 0.0
                 else:
                     ov_p = amount * base_price * (1.0 - fee_open)
-                    cv_p = amount * base_exit_price * (1.0 + fee) - funding_so_far
+                    cv_p = amount * base_exit_price * (1.0 + close_fee(p, base_exit_price)) - funding_so_far
                     profit_at_close = (1.0 - (cv_p / ov_p)) * lev if ov_p else 0.0
                 resolved_exit = _resolve_exit_price(
                     pair, p.local_trade, current_time_exit, base_exit_price,
@@ -1800,7 +1848,7 @@ def _joint_multi_pair_backtest(
                     return False
                 close_position(pair, p, i, base_exit_price, exit_reason, reason_tag,
                                current_time_exit, funding_so_far,
-                               fee_close=fill_fee(base_exit_price, open_i, not is_long))
+                               fee_close=fill_fee(base_exit_price, open_i, not is_long, p=p))
                 return True
 
             if exit_reason != "Liquidation" and \
@@ -1808,7 +1856,7 @@ def _joint_multi_pair_backtest(
                 continue  # vetoed -> try the next candidate this same bar (a liquidation can't be)
 
             close_position(pair, p, i, base_exit_price, exit_reason, reason_tag,
-                           current_time_exit, funding_so_far, fee_close=fee)
+                           current_time_exit, funding_so_far, fee_close=close_fee(p, base_exit_price))
             return True
 
         return False  # every candidate this bar was vetoed by confirm_trade_exit
@@ -2026,7 +2074,8 @@ def _joint_multi_pair_backtest(
         idx = p.n - 1
         is_long = not p.is_short
         open_i = p.open[idx]
-        exit_price = open_i * (1.0 - fee) if is_long else open_i * (1.0 + fee)
+        fee_c = close_fee(p, open_i)
+        exit_price = open_i * (1.0 - fee_c) if is_long else open_i * (1.0 + fee_c)
         lev = p.trade_leverage
         stake = p.trade_stake
         amount = p.trade_amount
@@ -2041,12 +2090,12 @@ def _joint_multi_pair_backtest(
 
         if is_long:
             open_value = amount * p.base_price * (1.0 + p.entry_fee)
-            close_value = amount * open_i * (1.0 - fee) + funding_fees
+            close_value = amount * open_i * (1.0 - fee_c) + funding_fees
             pnl_amount = close_value - open_value
             leveraged_profit = ((close_value / open_value) - 1.0) * lev if open_value else 0.0
         else:
             open_value = amount * p.base_price * (1.0 - p.entry_fee)
-            close_value = amount * open_i * (1.0 + fee) - funding_fees
+            close_value = amount * open_i * (1.0 + fee_c) - funding_fees
             pnl_amount = open_value - close_value
             leveraged_profit = (1.0 - (close_value / open_value)) * lev if open_value else 0.0
 
@@ -2055,7 +2104,7 @@ def _joint_multi_pair_backtest(
         trades.append({
             "pair": pair, "is_short": p.is_short, "entry_row": p.entry_row, "exit_row": idx,
             "entry_price": p.entry_price, "base_exit_price": open_i, "exit_price": exit_price,
-            "base_entry_price": p.base_price, "fee_open": p.entry_fee, "fee_close": fee,
+            "base_entry_price": p.base_price, "fee_open": p.entry_fee, "fee_close": fee_c,
             "profit_ratio": leveraged_profit, "profit_abs": pnl_amount,
             "leverage": p.trade_leverage, "exit_reason": "ForceExit", "exit_reason_tag": "force_exit", "stake": stake,
             "funding_fees": funding_fees,

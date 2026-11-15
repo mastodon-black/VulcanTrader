@@ -58,8 +58,16 @@ target_home() { getent passwd "$(target_user)" | cut -d: -f6; }
 
 SETTINGS_HOME="$(target_home)"
 NT8_SETTINGS="${NT8_SETTINGS:-$SETTINGS_HOME/.config/vulcantrader/ninjatrader.env}"
+# Values already in the environment win over the settings file, so a one-off
+# `NT8_CREDENTIALS=... ./setup-ninjatrader.sh credentials` really targets that file.
+_nt8_env_overrides=()
+for _v in NT8_WINEPREFIX NT8_DISPLAY BRIDGE_PORT NT8_CREDENTIALS; do
+    [[ -n "${!_v:-}" ]] && _nt8_env_overrides+=("$_v=${!_v}")
+done
 # shellcheck disable=SC1090
 [[ -f "$NT8_SETTINGS" ]] && source "$NT8_SETTINGS"
+for _kv in "${_nt8_env_overrides[@]}"; do printf -v "${_kv%%=*}" '%s' "${_kv#*=}"; done
+unset _v _kv _nt8_env_overrides
 NT8_WINEPREFIX="${NT8_WINEPREFIX:-$SETTINGS_HOME/.wine-ninjatrader}"
 NT8_DISPLAY="${NT8_DISPLAY:-:99}"
 BRIDGE_PORT="${BRIDGE_PORT:-8755}"
@@ -240,10 +248,21 @@ step_credentials() {
     require_user credentials
     local u="${NT_USERNAME:-}" p="${NT_PASSWORD:-}"
     if [[ -z "$u" || -z "$p" ]]; then
-        if [[ -f "$NT8_CREDENTIALS" ]]; then log "Credentials file already present: $NT8_CREDENTIALS"; return; fi
+        if [[ -f "$NT8_CREDENTIALS" ]]; then
+            local saved_user="" ans
+            saved_user="$(sed -n 's/^NT_USERNAME=//p' "$NT8_CREDENTIALS" 2>/dev/null | head -1)"
+            log "Credentials file already present: $NT8_CREDENTIALS${saved_user:+ (user: $saved_user)}"
+            if [[ ! -t 0 ]]; then
+                log "Keeping it. To replace non-interactively: NT_USERNAME=... NT_PASSWORD=... $0 credentials"
+                return
+            fi
+            read -rp "Replace the saved NinjaTrader login? [y/N] " ans
+            [[ "$ans" =~ ^[Yy] ]] || { log "Keeping existing credentials."; return; }
+        fi
         [[ -t 0 ]] || die "Set NT_USERNAME and NT_PASSWORD (or run interactively)."
         read -rp "NinjaTrader username: " u
         read -rsp "NinjaTrader password: " p; echo
+        [[ -n "$u" && -n "$p" ]] || die "Username and password must both be non-empty; nothing saved."
     fi
     mkdir -p "$(dirname "$NT8_CREDENTIALS")"
     ( umask 077; printf 'NT_USERNAME=%q\nNT_PASSWORD=%q\n' "$u" "$p" > "$NT8_CREDENTIALS" )

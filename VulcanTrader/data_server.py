@@ -2172,12 +2172,36 @@ class ClientInterestRegistry:
         # takes.
         self._submit_union_changed(union_pairs, union_timeframes, union_ffr, union_trades)
 
-    def unregister(self, client_id: str) -> None:
+    def unregister(self, client_id: str, connection: _ClientConnection | None = None) -> None:
+        """Drop `client_id`'s interest - but only if `connection` (when given)
+        is still the connection registered under that id.
+
+        A client that reconnects re-registers under the SAME client_id, often
+        before the master has noticed its old socket is dead. The old handler's
+        `finally:` then runs unregister() for that id; popping by name alone
+        deleted the NEW connection's registration. Live on 2026-11-14 17:06 UTC
+        all four fleet-worker clients reconnected after a 183s tick, the four
+        stale handlers then wiped every fresh registration, the union went to 0
+        pairs and no candles were collected for the rest of the run - nothing
+        re-registers while the new sockets stay up."""
         with self._lock:
-            removed = self._clients.pop(client_id, None) is not None
-            self._connections.pop(client_id, None)
+            current = self._connections.get(client_id)
+            if connection is not None and current is not None and current is not connection:
+                stale = True
+                removed = False
+            else:
+                stale = False
+                removed = self._clients.pop(client_id, None) is not None
+                self._connections.pop(client_id, None)
             union_pairs, union_timeframes, union_ffr, union_trades = self._union()
             n_clients = len(self._clients)
+        if stale:
+            logger.info(
+                "Client '%s': stale connection closed; its newer connection keeps the "
+                "registration (union %d pair(s) across %d client(s))",
+                client_id, len(union_pairs), n_clients,
+            )
+            return
         if removed:
             logger.info(
                 "Client '%s' disconnected (union now %d pair(s), %s across %d client(s))",
@@ -2343,7 +2367,7 @@ class _ClientHandler(socketserver.BaseRequestHandler):
                     break
         finally:
             if registry is not None and registered:
-                registry.unregister(client_id)
+                registry.unregister(client_id, connection=conn)
             # Stop this connection's sender thread; without it every dropped
             # client would leak one blocked-on-get() thread for the life of the
             # process.
@@ -2773,8 +2797,13 @@ class WorkDistributor:
         )
         self._rebalance()
 
-    def unregister(self, name: str) -> None:
+    def unregister(self, name: str, conn: SubserverConnection | None = None) -> None:
+        # Same reconnect race as ClientInterestRegistry.unregister: a subserver
+        # that reconnects under the same name must not be removed by its old
+        # connection's handler exiting afterwards.
         with self._lock:
+            if conn is not None and self._subservers.get(name) not in (None, conn):
+                return
             removed = self._subservers.pop(name, None) is not None
             worker_count = 1 + len(self._subservers)
         if removed:
@@ -2889,7 +2918,7 @@ class _SubserverHandler(socketserver.BaseRequestHandler):
                     logger.warning("Subserver '%s' sent unknown message type: %r", name, mtype)
         finally:
             if distributor is not None and conn is not None:
-                distributor.unregister(name)
+                distributor.unregister(name, conn)
             logger.info("Subserver '%s' disconnected (%s)", name, peer)
 
 

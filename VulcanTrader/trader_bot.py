@@ -1966,8 +1966,18 @@ class VulcanTraderBot(LoggingMixin):
                 order, "average", "price", enter_limit_requested
             )
 
-        # Fee is applied twice because we make a LIMIT_BUY and LIMIT_SELL
-        fee = self.exchange.get_fee(symbol=pair, taker_or_maker="maker")
+        # Fee is applied twice because we make a LIMIT_BUY and LIMIT_SELL.
+        # Pass the fill price: CME-style flat $/contract commissions
+        # (Ninjatrader/Rithmic/Futuressim get_fee()) are converted to a
+        # %-of-notional rate AT that price. Without it get_fee() defaults
+        # price=1 and turns e.g. ZC's $2.25/contract into a 4.5% fee per side
+        # (~$995 each way on one corn contract - seen 2026-11-12 on every
+        # configNT_* trade). This rate also sticks: Trade.update_fee() never
+        # replaces it with the order's own fee, because fee_*_currency defaults
+        # to "" (not None) - see the exit-side re-pricing in execute_trade_exit.
+        fee = self.exchange.get_fee(
+            symbol=pair, taker_or_maker="maker", price=enter_limit_filled_price or 1
+        )
         base_currency = self.exchange.get_pair_base_currency(pair)
         open_date = datetime.now(UTC)
 
@@ -2067,6 +2077,36 @@ class VulcanTraderBot(LoggingMixin):
                 )
         return trade
 
+    def _whole_contract_min_stake(
+        self, pair: str, stake_amount: float | None, min_stake_amount: float | None
+    ) -> float | None:
+        """Lift a new entry's stake to the one-contract minimum on whole-contract futures.
+
+        CME futures (Ninjatrader/Rithmic - the exchanges exposing a flat
+        `get_fee_per_contract`) can only fill whole contracts at leverage 1, so the
+        smallest possible entry costs one contract's notional (`min_stake_amount`).
+        Strategies were backtested on fractional contracts and propose stakes far
+        below that (a 15k stake vs a ~155k HG contract); `validate_stake_amount`
+        would then silently drop the entry under its "> +30% adjustment" rule, so
+        such bots never trade. Take the one-contract minimum instead -
+        `validate_stake_amount` still rejects it when the wallet cannot fund it.
+        Crypto exchanges (no `get_fee_per_contract`) are unaffected.
+        """
+        if (
+            not isinstance(stake_amount, (int, float))
+            or not min_stake_amount
+            or not 0 < stake_amount < min_stake_amount
+        ):
+            return stake_amount
+        fee_per_contract = getattr(self.exchange, "get_fee_per_contract", None)
+        if not callable(fee_per_contract) or not fee_per_contract(pair):
+            return stake_amount
+        logger.debug(
+            f"{pair}: stake {stake_amount:.2f} is below one contract - "
+            f"using the one-contract minimum {min_stake_amount:.2f}."
+        )
+        return min_stake_amount
+
     def get_valid_enter_price_and_stake(
         self,
         pair: str,
@@ -2157,6 +2197,7 @@ class VulcanTraderBot(LoggingMixin):
                 entry_tag=entry_tag,
                 side=trade_side,
             )
+            stake_amount = self._whole_contract_min_stake(pair, stake_amount, min_stake_amount)
 
         stake_amount = self.wallets.validate_stake_amount(
             pair=pair,
@@ -3146,6 +3187,17 @@ class VulcanTraderBot(LoggingMixin):
         if trade.has_open_orders:
             if self.handle_similar_open_order(trade, limit, amount, trade.exit_side):
                 return False
+
+        # Flat $/contract commissions (exchanges with get_fee_per_contract:
+        # Ninjatrader/Rithmic/Futuressim) are a different %-of-notional at the
+        # exit price than at entry, and the order's own fee never reaches the
+        # trade (see the entry-fee comment in execute_entry) - so re-price the
+        # exit fee here. %-fee (crypto) exchanges are untouched.
+        fee_per_contract = getattr(self.exchange, "get_fee_per_contract", None)
+        if callable(fee_per_contract) and limit and fee_per_contract(trade.pair):
+            trade.fee_close = self.exchange.get_fee(
+                symbol=trade.pair, taker_or_maker="maker", price=limit
+            )
 
         try:
             # Execute exit and update trade record

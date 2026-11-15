@@ -1585,8 +1585,14 @@ class Trade(ModelBase, LocalTrade):
     def delete(self) -> None:
         for order in list(self.orders):
             Order.session.delete(order)
-        CustomDataWrapper.delete_custom_data(trade_id=self.id)
+        # Unregister the trade BEFORE delete_custom_data(): that call commits whenever the
+        # trade has custom data (every entry stores "entry_snr" while Discord is on), and the
+        # commit's _sync_trade_orders() re-registers the orders of every trade still in
+        # Trade._instances(). With this trade still registered, its just-deleted orders came
+        # straight back and stayed in the account as "open" orders with no trade - one per
+        # cancelled unfilled entry (179 on configBotOdinEngine by 2026-11-14).
         Trade.session.delete(self)
+        CustomDataWrapper.delete_custom_data(trade_id=self.id)
         Trade.commit()
 
     @staticmethod
